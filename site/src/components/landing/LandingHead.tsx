@@ -5,7 +5,7 @@ export default function LandingHead() {
         <main className="relative overflow-hidden">
             {/* Background Glow */}
             <div className="absolute inset-0 bg-[#191919]" />
-            <section className="relative flex flex-col items-center justify-center text-center pb-10 px-6 pt-25">
+            <section className="relative flex flex-col items-center justify-center text-center pb-10 px-6 py-25">
                 <h1 className="text-7xl md:text-8xl font-extrabold">
                     Welcome To
                     <span className="text-red-600"> PiraTube</span>
@@ -25,7 +25,7 @@ export default function LandingHead() {
                     </Link>
 
                     <Link
-                        href="#library" // Points to a section on the page, or change to "/browse"
+                        href="/browse"
                         className="px-8 py-4 rounded-xl border border-gray-700 hover:border-gray-500 transition font-medium text-gray-300"
                     >
                         Browse Library

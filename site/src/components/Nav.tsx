@@ -6,6 +6,7 @@ const navLinks = [
   { href: "/", label: "Home" },
   { href: "/trending", label: "Trending" },
   { href: "/Aboutus", label: "About Us" },
+  { href: "/browse", label: "Browse"}
 ];
 
 export default function Nav() {
