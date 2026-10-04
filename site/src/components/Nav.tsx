@@ -14,7 +14,7 @@ export default function Nav() {
       {/* Brand Logo & Name */}
       <Link href="/" className="nav-logo">
         {/* temporary logo, change LATER */}
-        <Image src="/globe.svg" alt="PiraTube Logo" width={32} height={32} loading="eager"/>
+        <Image src="/globe.svg" alt="PiraTube Logo" width={26} height={26} loading="eager"/>
         <span className="text-xl font-bold text-red-500">PiraTube</span>
       </Link>
 
@@ -24,7 +24,7 @@ export default function Nav() {
           <li key={link.href}>
             <Link
               href={link.href}
-              className="text-sm font-medium text-neutral-300 hover:text-white transition-colors"
+              className="text-lg font-medium text-neutral-300 hover:text-white transition-colors"
             >
               {link.label}
             </Link>
@@ -36,13 +36,13 @@ export default function Nav() {
       <div className="flex items-center gap-3">
         <Link
           href="/login"
-          className="text-sm font-medium text-neutral-300 hover:text-white transition-colors px-3 py-1.5"
+          className="text-base font-medium text-neutral-300 hover:text-white transition-colors px-3 py-1.5"
         >
           Login
         </Link>
         <Link
           href="/register"
-          className="text-sm font-medium bg-red-600 hover:bg-red-700 text-white px-3.5 py-3 rounded-md transition-colors"
+          className="text-base font-medium bg-red-600 hover:bg-red-700 text-white px-4.5 py-1.5 rounded-md transition-colors"
         >
           Sign Up
         </Link>

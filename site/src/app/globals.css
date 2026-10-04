@@ -38,6 +38,6 @@ body {
 .nav-links {
   display: flex;
   align-items: center;
-  gap: 1.5rem;
+  gap: 4.5rem;
   list-style: none;
 }
