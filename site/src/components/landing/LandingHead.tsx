@@ -1,10 +1,12 @@
+import Link from "next/link"
+
 export default function LandingHead() {
     return (
         <main className="relative overflow-hidden">
             {/* Background Glow */}
             <div className="absolute inset-0 bg-[#191919]" />
             <section className="relative flex flex-col items-center justify-center text-center pb-10 px-6 pt-25">
-                <h1 className="text-7xl md:text-8x1 font-extrabold">
+                <h1 className="text-7xl md:text-8xl font-extrabold">
                     Welcome To
                     <span className="text-red-600"> PiraTube</span>
                 </h1>
@@ -14,14 +16,20 @@ export default function LandingHead() {
                     Fast, free, and most importantly: no subscription!
                 </p>
 
-                <div className="flex gap-6 mt-5">
-                    <button className="px-8 py-4 rounded-xl bg-red-600 hover:bg-red-700 transition font-semibold">
+                <div className="flex flex-wrap justify-center gap-4 mt-8">
+                    <Link
+                        href="/register"
+                        className="px-8 py-4 rounded-xl bg-red-600 hover:bg-red-700 transition font-semibold text-white shadow-lg shadow-red-600/20"
+                    >
                         Create An Account
-                    </button>
+                    </Link>
 
-                    <button className="px-8 py-4 rounded-xl border border-gray-700 hover:border-gray-400 transition">
+                    <Link
+                        href="#library" // Points to a section on the page, or change to "/browse"
+                        className="px-8 py-4 rounded-xl border border-gray-700 hover:border-gray-500 transition font-medium text-gray-300"
+                    >
                         Browse Library
-                    </button>
+                    </Link>
                 </div>
             </section>
         </main>
