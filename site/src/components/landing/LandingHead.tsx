@@ -15,7 +15,7 @@ export default function LandingHead() {
                 </p>
 
                 <div className="flex gap-6 mt-5">
-                    <button className="px-8 py-4 rounded-xl bg-red-500 hover:bg-red-400 transition font-semibold">
+                    <button className="px-8 py-4 rounded-xl bg-red-600 hover:bg-red-700 transition font-semibold">
                         Create An Account
                     </button>
 

@@ -3,6 +3,7 @@
 :root {
   --background: #202020;
   --foreground: #ffffff;
+  --border: #333333;
 }
 
 body {
@@ -10,19 +11,33 @@ body {
   color: var(--foreground);
 }
 
+/* Navigation bar layout */
 .nav {
-  position: fixed; top: 0; left: 0; right: 0;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 100;
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 1.5rem; height: 64px;
-  background: rgba(17, 17, 17, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.5rem;
+  height: 64px;
+  background: rgba(17, 17, 17, 0.75);
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(8px);
 }
 
 .nav-logo {
-  display: flex; align-items: center; gap: 12px; text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
 }
-@media (max-width: 680px) {
-  .nav {padding: 0 1.2rem;}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  list-style: none;
 }
