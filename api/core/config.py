@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     APP_NAME: str = "PiraTube API"
     APP_VERSION: str = "0.0.1"
 
+    ALLOWED_ORIGINS: str = "http://localhost:3000"
+
     @property
     def allowed_origins_list(self) -> list[str]:
         """Parse ALLOWED_ORIGINS into a list — accepts comma-separated or JSON array."""
