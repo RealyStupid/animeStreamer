@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PiraTube",
-  description: "One stop for free pirated media!",
+  title: "AnimeWatcher",
+  description: "One stop shop for free media!",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

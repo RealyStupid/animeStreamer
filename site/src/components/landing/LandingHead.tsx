@@ -8,7 +8,7 @@ export default function LandingHead() {
             <section className="relative flex flex-col items-center justify-center text-center pb-10 px-6 py-25">
                 <h1 className="text-7xl md:text-8xl font-extrabold">
                     Welcome To
-                    <span className="text-red-600"> PiraTube</span>
+                    <span className="text-red-600"> Anime Watcher</span>
                 </h1>
 
                 <p className="mt-6 max-w-2xl text-xl text-gray-500">
