@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # App
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
-    APP_NAME: str = "AnimeWatcher API"
+    APP_NAME: str = "PiraTube API"
     APP_VERSION: str = "0.0.1"
 
     ALLOWED_ORIGINS: str = "http://localhost:3000"

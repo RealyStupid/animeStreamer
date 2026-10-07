@@ -4,7 +4,7 @@
 from contextlib import asynccontextmanager
 import logging
 from time import perf_counter
-
+import models
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -25,6 +25,7 @@ from core.logging import LoggingConfig, configure_logging, get_logger
 from core.database import engine, Base
 
 from sqlalchemy import text
+
 # Settings
 settings = get_settings()
 
@@ -113,6 +114,7 @@ async def lifespan(app: FastAPI):
 
     try:
         async with engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS citext;"))
             await conn.run_sync(Base.metadata.create_all)
             await conn.execute(text("SELECT 1"))
     except Exception as e:
