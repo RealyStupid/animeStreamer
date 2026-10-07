@@ -91,19 +91,22 @@ async def lifespan(app: FastAPI):
         logger.debug("Registered routes:\n" + "\n".join(sorted(routes)))
 
         # get settings info
-        logger.debug(
-            "Configuration Settings:\n" +
-            f"                                  App Name:                   '{settings.APP_NAME}'\n" +
-            f"                                  App Version:                '{settings.APP_VERSION}'\n"
-            f"                                  Enviroment:                 '{settings.ENVIRONMENT}'\n" +
-            f"                                  Debug:                      '{str(settings.DEBUG)}'\n" +
-            f"                                  Allowed Hosts:              '{settings.allowed_origins_list}'\n" +
-            f"                                  Secret Key:                 '{settings.SECRET_KEY}'\n" +
-            f"                                  Algorithm:                  '{settings.ALGORITHM}'\n" +
-            f"                                  Access Token Expire Min:    '{settings.ACCESS_TOKEN_EXPIRE_MINUTES}'\n" +
-            f"                                  Refresh Token Expire Days:  '{settings.REFRESH_TOKEN_EXPIRE_DAYS}'\n" +
-            f"                                  Database URL:               '{settings.DATABASE_URL}'\n"
-        )
+        if settings.ENVIRONMENT == "development":
+            logger.debug(
+                "Configuration Settings:\n" +
+                f"                                  App Name:                   '{settings.APP_NAME}'\n" +
+                f"                                  App Version:                '{settings.APP_VERSION}'\n"
+                f"                                  Enviroment:                 '{settings.ENVIRONMENT}'\n" +
+                f"                                  Debug:                      '{str(settings.DEBUG)}'\n" +
+                f"                                  Allowed Hosts:              '{settings.allowed_origins_list}'\n" +
+                f"                                  Secret Key:                 '{settings.SECRET_KEY}'\n" +
+                f"                                  Algorithm:                  '{settings.ALGORITHM}'\n" +
+                f"                                  Access Token Expire Min:    '{settings.ACCESS_TOKEN_EXPIRE_MINUTES}'\n" +
+                f"                                  Refresh Token Expire Days:  '{settings.REFRESH_TOKEN_EXPIRE_DAYS}'\n" +
+                f"                                  Database URL:               '{settings.DATABASE_URL}'\n"
+            )
+        else:
+            logger.info("Enviroment is detected as production and so configuration is hidden")
 
     # begin database
     logger.info("Begining Database\n")
