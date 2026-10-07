@@ -26,6 +26,8 @@ from core.database import engine, Base
 
 from sqlalchemy import text
 
+from routes.auth import auth
+
 # Settings
 settings = get_settings()
 
@@ -257,7 +259,7 @@ async def handle_unexpected_exception(
 # Routes
 API_PREFIX = "/api/v1"
 
-# add routers here
+app.include_router(auth,       prefix=API_PREFIX)
 
 # Health & Meta
 @app.get("/api/health", tags=["Meta"])
