@@ -18,9 +18,13 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
-from core.config    import get_settings
-from core.logging   import LoggingConfig, configure_logging, get_logger
+from core.config import get_settings
 
+from core.logging import LoggingConfig, configure_logging, get_logger
+
+from core.database import engine, Base
+
+from sqlalchemy import text
 # Settings
 settings = get_settings()
 
@@ -41,6 +45,11 @@ configure_logging(
         log_format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
         capture_root=True,
     )
+)
+
+# In main.py, right after configure_logging(...)
+logging.getLogger("sqlalchemy.engine").setLevel(
+    logging.INFO if settings.DEBUG else logging.WARNING
 )
 
 # Uvicorn's default handlers bypass the root logger. Forward its server logs
@@ -84,23 +93,33 @@ async def lifespan(app: FastAPI):
         # get settings info
         logger.debug(
             "Configuration Settings:\n" +
-            f"                                  App Name {settings.APP_NAME}\n" +
-            f"                                  App Version {settings.APP_VERSION}\n"
-            f"                                  Enviroment: {settings.ENVIRONMENT}\n" +
-            f"                                  Debug {str(settings.DEBUG)}\n" +
-            f"                                  Allowed Hosts {settings.allowed_origins_list}\n" +
-            f"                                  Secret Key '{settings.SECRET_KEY}'\n" +
-            f"                                  Algorithm {settings.ALGORITHM}\n" +
-            f"                                  Access Token Expire Min {settings.ACCESS_TOKEN_EXPIRE_MINUTES}\n" +
-            f"                                  Refresh Token Expire Days {settings.REFRESH_TOKEN_EXPIRE_DAYS}\n" +
-            f"                                  Database URL '{settings.DATABASE_URL}'\n"
+            f"                                  App Name:                   '{settings.APP_NAME}'\n" +
+            f"                                  App Version:                '{settings.APP_VERSION}'\n"
+            f"                                  Enviroment:                 '{settings.ENVIRONMENT}'\n" +
+            f"                                  Debug:                      '{str(settings.DEBUG)}'\n" +
+            f"                                  Allowed Hosts:              '{settings.allowed_origins_list}'\n" +
+            f"                                  Secret Key:                 '{settings.SECRET_KEY}'\n" +
+            f"                                  Algorithm:                  '{settings.ALGORITHM}'\n" +
+            f"                                  Access Token Expire Min:    '{settings.ACCESS_TOKEN_EXPIRE_MINUTES}'\n" +
+            f"                                  Refresh Token Expire Days:  '{settings.REFRESH_TOKEN_EXPIRE_DAYS}'\n" +
+            f"                                  Database URL:               '{settings.DATABASE_URL}'\n"
         )
 
     # begin database
+    logger.info("Begining Database\n")
 
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        logger.error(f"Error While begining database '{settings.DATABASE_URL}': {e}")
+
+    logger.info("Database Beginned!")
     yield
 
-    # despose engine
+    logger.info("Stopping/dispossing Database")
+    await engine.dispose()
 
     logger.info("----- %s Stopped -----", app.title)
 
