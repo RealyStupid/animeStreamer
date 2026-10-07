@@ -39,15 +39,15 @@ configure_logging(
         console_level=      "DEBUG" if settings.DEBUG == True else "INFO",
         file=True,
         console=True if settings.ENVIRONMENT == "development" else False,
-        rotate=True,
-        max_bytes=10_000_000,
+        rotation_type="time",
+        rotation_when="midnight",
+        rotation_interval=1,
         backup_count=3,
         log_format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
         capture_root=True,
     )
 )
 
-# In main.py, right after configure_logging(...)
 logging.getLogger("sqlalchemy.engine").setLevel(
     logging.INFO if settings.DEBUG else logging.WARNING
 )

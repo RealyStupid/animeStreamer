@@ -15,9 +15,15 @@ Quick start
             console_level="INFO",
             console=True,
             file=True,
-            rotate=True,
+            rotation_type="size",
             max_bytes=10_000_000,
             backup_count=3,
+            rotation_when="midnight",
+            rotation_interval=1,
+            rotation_utc=False,
+            rotation_at_time=None,
+            delay=False,
+            errors=None,
             encoding="utf-8",
             log_format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
             date_format="%Y-%m-%d %H:%M:%S",
@@ -68,11 +74,58 @@ Configuration options
 * ``file`` and ``console`` (both default ``True``) independently enable file
   and terminal output.
 
-* ``rotate`` (default ``True``) enables size-based rotation. 
+* ``rotation_type`` selects how the file is managed:
 
-* ``max_bytes`` (default ``10_000_000``) is the maximum file size before rotation, and
-  ``backup_count`` (default ``5``) is the number of rotated backups to retain.
-  Set ``rotate=False`` to use a regular file handler.
+  * ``"size"`` rotates at ``max_bytes`` (default ``10_000_000``).
+
+  * ``"time"`` rotates on a schedule controlled by ``rotation_when`` and
+    ``rotation_interval``. ``rotation_when`` accepts ``"S"``, ``"M"``, ``"H"``,
+    ``"D"``, ``"midnight"``, and weekdays ``"W0"`` through ``"W6"``.
+    ``rotation_utc`` selects UTC scheduling; ``rotation_at_time`` optionally
+    sets a local/UTC wall-clock time for midnight or weekly rotation.
+
+  * ``"watched"`` uses ``WatchedFileHandler`` for files rotated externally
+    (for example by logrotate). It detects a file replacement and reopens it;
+    it does not perform rotation or retain backups itself. This mode is for
+    Unix-like systems and is not appropriate on Windows.
+
+  * ``"none"`` writes to a regular file without rotating.
+  ``backup_count`` (default ``5``) is the number of old files retained by the
+  built-in size- and time-based handlers. Zero disables retaining backups.
+  ``rotate`` remains as a backwards-compatible boolean: when
+  ``rotation_type`` is omitted, ``True`` selects ``"size"`` and ``False``
+  selects ``"none"``.
+
+  For example, daily rotation at midnight:
+
+      LoggingConfig(rotation_type="time", rotation_when="midnight")
+
+  For weekly rotation on Monday at 02:30 UTC, retaining four backups:
+
+      from datetime import time
+      LoggingConfig(
+          rotation_type="time",
+          rotation_when="W0",
+          rotation_at_time=time(2, 30),
+          rotation_utc=True,
+          backup_count=4,
+      )
+
+  To work with an external rotator instead:
+
+      LoggingConfig(rotation_type="watched")
+
+* ``rotation_interval`` (default ``1``) multiplies the selected time unit;
+  for example ``rotation_when="H", rotation_interval=6`` rotates every six
+  hours.
+
+* ``max_bytes`` applies to ``"size"`` mode only.
+
+* ``delay`` (default ``False``) postpones opening the file until the first
+  message is logged.
+
+* ``errors`` (default ``None``) selects the text encoding error handler used
+  when writing the log file.
 
 * ``encoding`` (default ``"utf-8"``) selects the file encoding.
 
@@ -82,9 +135,10 @@ Configuration options
 
 * ``console_stream`` (default ``"stderr"``) chooses ``"stderr"`` or
   ``"stdout"`` for terminal output.
-  
+
 * ``propagate`` (default ``False``) controls whether records are also passed
   to the root logger.
+
 * ``capture_root`` (default ``False``) attaches these handlers to the root
   logger too, so records from other libraries can use the same destinations.
   The configured application logger does not propagate, preventing its own
@@ -96,8 +150,13 @@ and handlers owned by other code are left untouched.
 """
 
 from dataclasses import dataclass
+from datetime import time as datetime_time
 import logging
-from logging.handlers import RotatingFileHandler
+from logging.handlers import (
+    RotatingFileHandler,
+    TimedRotatingFileHandler,
+    WatchedFileHandler,
+)
 from pathlib import Path
 import sys
 from typing import Literal
@@ -109,6 +168,15 @@ _DEFAULT_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 _DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _configured_logger_name = _DEFAULT_LOGGER_NAME
 _root_original_level: int | None = None
+RotationType = Literal["size", "time", "watched", "none"]
+_TIMED_ROTATION_WHEN_VALUES = {
+    "S",
+    "M",
+    "H",
+    "D",
+    "MIDNIGHT",
+    *(f"W{weekday}" for weekday in range(7)),
+}
 
 
 @dataclass
@@ -124,9 +192,16 @@ class LoggingConfig:
     file: bool = True
     console: bool = True
     rotate: bool = True
+    rotation_type: RotationType | None = None
     max_bytes: int = 10_000_000
     backup_count: int = 5
+    rotation_when: str = "midnight"
+    rotation_interval: int = 1
+    rotation_utc: bool = False
+    rotation_at_time: datetime_time | None = None
+    delay: bool = False
     encoding: str = "utf-8"
+    errors: str | None = None
     log_format: str = _DEFAULT_FORMAT
     date_format: str = _DEFAULT_DATE_FORMAT
     console_stream: Literal["stdout", "stderr"] = "stderr"
@@ -157,10 +232,24 @@ def configure_logging(config: LoggingConfig | None = None) -> logging.Logger:
         raise ValueError("max_bytes must be zero or greater")
     if config.backup_count < 0:
         raise ValueError("backup_count must be zero or greater")
+    if config.rotation_interval < 1:
+        raise ValueError("rotation_interval must be greater than zero")
     if config.file and not config.filename:
         raise ValueError("filename must not be empty when file logging is enabled")
     if config.console_stream not in ("stdout", "stderr"):
         raise ValueError("console_stream must be either 'stdout' or 'stderr'")
+
+    rotation_type = config.rotation_type
+    if rotation_type is None:
+        rotation_type = "size" if config.rotate else "none"
+    if rotation_type not in ("size", "time", "watched", "none"):
+        raise ValueError(f"Invalid rotation type: {rotation_type!r}")
+    if config.rotation_when.upper() not in _TIMED_ROTATION_WHEN_VALUES:
+        raise ValueError(f"Invalid time rotation interval: {config.rotation_when!r}")
+    if config.rotation_at_time is not None and not isinstance(
+        config.rotation_at_time, datetime_time
+    ):
+        raise ValueError("rotation_at_time must be a datetime.time or None")
 
     logger_level = _resolve_level(config.level)
     file_level = _resolve_level(
@@ -176,15 +265,41 @@ def configure_logging(config: LoggingConfig | None = None) -> logging.Logger:
         if config.file:
             log_path = Path(config.directory) / config.filename
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            if config.rotate:
+            if rotation_type == "size":
                 file_handler: logging.Handler = RotatingFileHandler(
                     log_path,
                     maxBytes=config.max_bytes,
                     backupCount=config.backup_count,
                     encoding=config.encoding,
+                    delay=config.delay,
+                    errors=config.errors,
+                )
+            elif rotation_type == "time":
+                file_handler = TimedRotatingFileHandler(
+                    log_path,
+                    when=config.rotation_when,
+                    interval=config.rotation_interval,
+                    backupCount=config.backup_count,
+                    encoding=config.encoding,
+                    delay=config.delay,
+                    utc=config.rotation_utc,
+                    atTime=config.rotation_at_time,
+                    errors=config.errors,
+                )
+            elif rotation_type == "watched":
+                file_handler = WatchedFileHandler(
+                    log_path,
+                    encoding=config.encoding,
+                    delay=config.delay,
+                    errors=config.errors,
                 )
             else:
-                file_handler = logging.FileHandler(log_path, encoding=config.encoding)
+                file_handler = logging.FileHandler(
+                    log_path,
+                    encoding=config.encoding,
+                    delay=config.delay,
+                    errors=config.errors,
+                )
             file_handler.setLevel(file_level)
             file_handler.setFormatter(formatter)
             setattr(file_handler, _MANAGED_HANDLER_ATTRIBUTE, True)
