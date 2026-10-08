@@ -30,5 +30,5 @@ class Users(Base):
 
     handle:             Mapped[str]         = mapped_column(CITEXT, unique=True, nullable=False)
     email:              Mapped[str]         = mapped_column(CITEXT, unique=True, nullable=False)
-    role:               Mapped[RoleEnum]    = mapped_column(Enum(RoleEnum, name="user_role_enum", native_enum=True), default=RoleEnum.USER, nullable=False)
+    role:               Mapped[RoleEnum]    = mapped_column(Enum(RoleEnum, name="user_role_enum", native_enum=True), default=RoleEnum.USER, server_default=RoleEnum.USER.value, nullable=False)
     password_hashed:    Mapped[str]         = mapped_column(Text, nullable=False)

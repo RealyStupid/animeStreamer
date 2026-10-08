@@ -119,7 +119,9 @@ export function loginUser(credentials: LoginCredentials): Promise<AuthToken> {
   );
 }
 
-export function getCurrentUser(token = getAccessToken()): Promise<UserProfile> {
+export async function getCurrentUser(
+  token = getAccessToken(),
+): Promise<UserProfile> {
   if (!token) {
     throw new ApiError("You are not signed in.", 401);
   }
@@ -146,8 +148,23 @@ export function getAccessToken(): string | null {
   return window.localStorage.getItem(ACCESS_TOKEN_KEY);
 }
 
-export function isSignedIn(): boolean {
-  return getAccessToken() !== null;
+export async function isSignedIn(): Promise<boolean> {
+  const token = getAccessToken();
+  if (!token) {
+    return false;
+  }
+
+  try {
+    await getCurrentUser(token);
+    return true;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      clearAccessToken();
+      return false;
+    }
+
+    throw error;
+  }
 }
 
 export function clearAccessToken(): void {

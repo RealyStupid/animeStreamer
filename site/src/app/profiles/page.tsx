@@ -6,9 +6,7 @@ import { useEffect, useState } from "react";
 import {
   ApiError,
   clearAccessToken,
-  getAccessToken,
   getCurrentUser,
-  isSignedIn,
   type UserProfile,
 } from "@/tools/api/client";
 
@@ -19,14 +17,7 @@ export default function ProfilesPage() {
 
   useEffect(() => {
     let isCurrent = true;
-    if (!isSignedIn()) {
-      router.replace("/login");
-      return () => {
-        isCurrent = false;
-      };
-    }
-
-    getCurrentUser(getAccessToken())
+    getCurrentUser()
       .then((currentProfile) => {
         if (isCurrent) {
           setProfile(currentProfile);
