@@ -27,6 +27,7 @@ from core.database import engine, Base
 from sqlalchemy import text
 
 from routes.auth import auth
+from routes.users import users
 
 # Settings
 settings = get_settings()
@@ -86,12 +87,7 @@ async def lifespan(app: FastAPI):
 
     if settings.DEBUG:
         # listing routes
-        routes = [
-            f"  {', '.join(r.methods or []): <10} {r.path}"
-            for r in app.routes
-            if hasattr(r, "methods")
-        ]
-        logger.debug("Registered routes:\n" + "\n".join(sorted(routes)))
+        
 
         # get settings info
         if settings.ENVIRONMENT == "development":
@@ -259,7 +255,8 @@ async def handle_unexpected_exception(
 # Routes
 API_PREFIX = "/api/v1"
 
-app.include_router(auth,       prefix=API_PREFIX)
+app.include_router(auth,        prefix=API_PREFIX)
+app.include_router(users,       prefix=API_PREFIX)
 
 # Health & Meta
 @app.get("/api/health", tags=["Meta"])

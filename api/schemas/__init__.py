@@ -3,6 +3,7 @@
 """
 import uuid
 from pydantic import BaseModel, EmailStr, Field
+from models import RoleEnum
 
 # Auth and sign in
 class UserRegister(BaseModel):
@@ -14,6 +15,7 @@ class UserResponse(BaseModel):
     id: uuid.UUID
     handle: str
     email: EmailStr
+    role: RoleEnum
 
     class Config:
         from_attributes = True
