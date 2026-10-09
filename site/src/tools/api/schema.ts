@@ -18,6 +18,7 @@ export interface UserProfile {
   id: string;
   handle: string;
   email: string;
+  role: string;
 }
 
 export function isAuthToken(value: unknown): value is AuthToken {

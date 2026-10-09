@@ -109,6 +109,12 @@ export default function ProfilesPage() {
                   {profile.id}
                 </dd>
               </div>
+              <div className="grid gap-1 px-5 py-4 sm:grid-cols-[140px_1fr] sm:gap-4">
+                <dt className="text-sm text-neutral-400">Account Role</dt>
+                <dd className="break-all font-mono text-sm text-neutral-300">
+                  {profile.role}
+                </dd>
+              </div>
             </dl>
           </section>
         ) : (
