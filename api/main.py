@@ -35,9 +35,9 @@ settings = get_settings()
 # Logging configuration
 configure_logging(
     LoggingConfig(
-        name=               "PiraTube",
+        name=               settings.APP_NAME,
         directory=          ".logs",
-        filename=           "piratube.log",
+        filename=           f"{settings.APP_NAME}.log",
         level=              "DEBUG" if settings.DEBUG == True else "INFO",
         file_level=         "DEBUG" if settings.DEBUG == True else "INFO",
         console_level=      "DEBUG" if settings.DEBUG == True else "INFO",
@@ -87,22 +87,39 @@ async def lifespan(app: FastAPI):
 
     if settings.DEBUG:
         # listing routes
-        
+        route_lines = []
+        for route in app.routes:
+            get_included_routes = getattr(route, "effective_route_contexts", None)
+            routes = get_included_routes() if callable(get_included_routes) else [route]
+            for included_route in routes:
+                methods = (
+                    ", ".join(
+                        sorted(getattr(included_route, "methods", None) or [])
+                    )
+                    or "N/A"
+                )
+                path = (
+                    getattr(included_route, "path_format", None)
+                    or getattr(included_route, "path", None)
+                    or "N/A"
+                )
+                route_lines.append(f"  {methods:<10} {path}")
+        logger.debug("Registered routes:\n%s", "\n".join(route_lines))
 
         # get settings info
         if settings.ENVIRONMENT == "development":
             logger.debug(
                 "Configuration Settings:\n" +
-                f"                                  App Name:                   '{settings.APP_NAME}'\n" +
-                f"                                  App Version:                '{settings.APP_VERSION}'\n"
-                f"                                  Enviroment:                 '{settings.ENVIRONMENT}'\n" +
-                f"                                  Debug:                      '{str(settings.DEBUG)}'\n" +
-                f"                                  Allowed Hosts:              '{settings.allowed_origins_list}'\n" +
-                f"                                  Secret Key:                 '{settings.SECRET_KEY}'\n" +
-                f"                                  Algorithm:                  '{settings.ALGORITHM}'\n" +
-                f"                                  Access Token Expire Min:    '{settings.ACCESS_TOKEN_EXPIRE_MINUTES}'\n" +
-                f"                                  Refresh Token Expire Days:  '{settings.REFRESH_TOKEN_EXPIRE_DAYS}'\n" +
-                f"                                  Database URL:               '{settings.DATABASE_URL}'\n"
+                f"  App Name:                   '{settings.APP_NAME}'\n" +
+                f"  App Version:                '{settings.APP_VERSION}'\n"
+                f"  Enviroment:                 '{settings.ENVIRONMENT}'\n" +
+                f"  Debug:                      '{str(settings.DEBUG)}'\n" +
+                f"  Allowed Hosts:              '{settings.allowed_origins_list}'\n" +
+                f"  Secret Key:                 '{settings.SECRET_KEY}'\n" +
+                f"  Algorithm:                  '{settings.ALGORITHM}'\n" +
+                f"  Access Token Expire Min:    '{settings.ACCESS_TOKEN_EXPIRE_MINUTES}'\n" +
+                f"  Refresh Token Expire Days:  '{settings.REFRESH_TOKEN_EXPIRE_DAYS}'\n" +
+                f"  Database URL:               '{settings.DATABASE_URL}'\n"
             )
         else:
             logger.info("Enviroment is detected as production and so configuration is hidden")
@@ -112,8 +129,10 @@ async def lifespan(app: FastAPI):
 
     try:
         async with engine.begin() as conn:
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS citext;"))
-            await conn.run_sync(Base.metadata.create_all)
+            # Alembic replaced this:
+            # await conn.execute(text("CREATE EXTENSION IF NOT EXISTS citext;"))
+            # await conn.run_sync(Base.metadata.create_all)
+
             await conn.execute(text("SELECT 1"))
     except Exception as e:
         logger.error(f"Error While begining database '{settings.DATABASE_URL}': {e}")
@@ -130,7 +149,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Backend API for PiraTube",
+    description=f"Backend API for {settings.APP_NAME}",
     docs_url="/api/docs"                if settings.DEBUG or settings.ENVIRONMENT == "development" else None,
     redoc_url="/api/redocs"             if settings.DEBUG or settings.ENVIRONMENT == "development" else None,
     openapi_url="/api/openapi.json"     if settings.DEBUG or settings.ENVIRONMENT == "development" else None,
