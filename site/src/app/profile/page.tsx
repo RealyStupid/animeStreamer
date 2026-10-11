@@ -59,7 +59,7 @@ export default function ProfilesPage() {
             href="/"
             className="text-sm font-semibold uppercase tracking-[0.2em] text-red-500"
           >
-            PiraTube
+            AnimeWatcher
           </Link>
           {profile && (
             <button

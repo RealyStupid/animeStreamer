@@ -15,8 +15,8 @@ export default function Nav() {
       {/* Brand Logo & Name */}
       <Link href="/" className="nav-logo">
         {/* temporary logo, change LATER */}
-        <Image src="/globe.svg" alt="PiraTube Logo" width={26} height={26} loading="eager"/>
-        <span className="text-xl font-bold text-red-500">PiraTube</span>
+        <Image src="/globe.svg" alt="AnimeWatcher Logo" width={26} height={26} loading="eager"/>
+        <span className="text-xl font-bold text-red-500">AnimeWatcher</span>
       </Link>
 
       {/* Navigation Links */}

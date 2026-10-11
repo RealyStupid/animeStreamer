@@ -46,7 +46,7 @@ export default function RegisterPage() {
           href="/"
           className="text-sm font-semibold uppercase tracking-[0.2em] text-red-500"
         >
-          PiraTube
+          AnimeWatcher
         </Link>
         {isRegistered ? (
           <>
@@ -69,7 +69,7 @@ export default function RegisterPage() {
               Create your account
             </h1>
             <p className="mt-2 text-sm text-neutral-400">
-              Join PiraTube and make your profile.
+              Join AnimeWatcher and make your profile.
             </p>
 
             <form className="mt-8 space-y-5" onSubmit={handleSubmit}>

@@ -22,7 +22,7 @@ export default function LoginPage() {
       const credentials: LoginCredentials = { username, password };
       const token: AuthToken = await loginUser(credentials);
       saveAccessToken(token.access_token);
-      router.replace("/profiles");
+      router.replace("/profile");
     } catch (submitError) {
       setError(
         submitError instanceof Error
@@ -40,7 +40,7 @@ export default function LoginPage() {
           href="/"
           className="text-sm font-semibold uppercase tracking-[0.2em] text-red-500"
         >
-          PiraTube
+          AnimeWatcher
         </Link>
         <h1 className="mt-5 text-3xl font-bold text-white">Welcome back</h1>
         <p className="mt-2 text-sm text-neutral-400">
@@ -106,7 +106,7 @@ export default function LoginPage() {
         </form>
 
         <p className="mt-6 text-center text-sm text-neutral-400">
-          New to PiraTube?{" "}
+          New to AnimeWatcher?{" "}
           <Link
             href="/register"
             className="font-medium text-red-400 hover:text-red-300"

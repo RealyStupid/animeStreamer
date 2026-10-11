@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PiraTube",
+  title: "AnimeWather",
   description: "One stop shop for free media!",
 };
 
