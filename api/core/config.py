@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Database
-    DATABASE_URL: str = "postgresql+psycopg://postgresql:PassW0rd@localhost:5432/piratube"
+    DATABASE_URL: str = "postgresql+psycopg://postgresql:PassW0rd@localhost:5432/animewatcher"
 
     # JWT
     SECRET_KEY: str = "insecure-dev-secret-change-me"

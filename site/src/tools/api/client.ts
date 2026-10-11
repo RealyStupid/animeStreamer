@@ -10,7 +10,7 @@ import {
 const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
 ).replace(/\/$/, "");
-const ACCESS_TOKEN_KEY = "piratube_access_token";
+const ACCESS_TOKEN_KEY = "access_token";
 
 export type { AuthToken, UserProfile } from "./schema";
 
