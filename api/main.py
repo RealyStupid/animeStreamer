@@ -4,29 +4,26 @@
 from contextlib import asynccontextmanager
 import logging
 from time import perf_counter
-import models
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-
 from fastapi.encoders import jsonable_encoder
-
 from fastapi.responses import JSONResponse
+
 
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 from core.config import get_settings
-
 from core.logging import LoggingConfig, configure_logging, get_logger
-
 from core.database import engine
-
 from core.storage import StorageManager
 
+
 from sqlalchemy import text
+
 
 from routes.auth import auth
 from routes.users import users
@@ -60,8 +57,8 @@ logging.getLogger("sqlalchemy.engine").setLevel(
 
 # storage manager initialzation
 storage = StorageManager(
-    default_path=".localdevstorage",
-    default_allocation="30 GiB"
+    default_path=".localDevStorage" if settings.ENVIRONMENT == "development" else ".localStorage",
+    default_allocation="10 GiB"
 )
 
 # Uvicorn's default handlers bypass the root logger. Forward its server logs
@@ -119,6 +116,17 @@ async def lifespan(app: FastAPI):
                 route_lines.append(f"  {methods:<10} {path}")
         logger.debug("Registered routes:\n%s", "\n".join(route_lines))
 
+        storageInfo = storage.get_storage(storage_id=storage.default_storage_id)
+        logger.debug(
+            f"Main Storage Information: \n" +
+            f"  Storage ID:             {storageInfo.storage_id}\n" +
+            f"  Path:                   {storageInfo.path}\n" +
+            f"  Alocated bytes:         {storageInfo.allocation_bytes}\n" +
+            f"  Bytes used:             {storageInfo.used_bytes}\n" +
+            f"  Available bytes:        {storageInfo.available_bytes}\n" +
+            f"  Filesystem free bytes:  {storageInfo.filesystem_free_bytes}\n"
+        )
+        
         # get settings info
         if settings.ENVIRONMENT == "development":
             logger.debug(

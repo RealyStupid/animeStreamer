@@ -1,66 +1,130 @@
-"""Local, quota-aware storage for untrusted show uploads.
+"""Indexed, quota-aware local storage for untrusted show uploads.
 
 Quick start
 ===========
 
-Create one manager at application startup and reuse it. The default storage
-directory is ``.localstorage`` relative to the process working directory:
+1. Create one manager when the API starts and reuse it for requests. A relative
+   storage path is resolved from the process working directory; an absolute
+   path can point to another mounted drive. Adding a location creates the
+   directory, a small SQLite index at its root, and a lock file used to
+   coordinate concurrent writers:
 
-    from core.storage import StorageManager
+       from core.storage import StorageManager
 
-    storage = StorageManager(
-        default_path=".localstorage",
-        default_allocation="500 GiB",
-    )
+       storage = StorageManager(
+           default_path=".localstorage",
+           default_allocation="500 GiB",
+       )
 
-Add another directory on a different mounted drive with ``add_storage``.
-Allocations support bytes and decimal or binary units (for example, ``"20 GB"``
-or ``"20 GiB"``); omit an allocation for no per-location quota:
+   The first time a location is registered, every existing entry not already
+   recorded in its SQLite index is deleted. Back up or move anything you want
+   to keep before registering an existing directory. The index database,
+   SQLite sidecars, and lock file are internal metadata and are not storage
+   entries. Later, files or folders created outside this manager are also
+   removed during the next reconciliation or manager operation.
 
-    archive_id = storage.add_storage(
-        "/mnt/archive/.storage",
-        allocation="2 TiB",
-        storage_id="archive",
-    )
+2. Optionally register more locations, for example a directory on a separate
+   disk. Each storage location has its own index and quota:
 
-Pass a FastAPI ``UploadFile`` directly to ``save_upload``. Use the returned
-generated filename/path for your database record; the client-supplied filename
-is used only to select the allowed extension, never as the stored path:
+       archive_id = await storage.async_add_storage(
+           "/mnt/archive/.storage",
+           allocation="2 TiB",
+           storage_id="archive",
+       )
 
-    stored = await storage.save_upload(
-        upload_file,
-        upload_file.filename or "",
-        storage_id=archive_id,
-    )
-    # Save stored.path (or a storage ID plus stored.filename) in your database.
-    # stored.media_type, stored.size_bytes, and stored.sha256 are also available.
+   Allocations accept integer byte counts or decimal/binary size strings such
+   as ``"20 GB"``, ``"20 GiB"``, or ``"500 MB"``. Omitting ``allocation``
+   disables the per-location quota, but available physical filesystem space is
+   still checked. The manager keeps a 64 MiB free-space reserve by default.
+   Set ``minimum_free_bytes=0`` only when that reserve is not wanted.
 
-``get_storage(storage_id)`` and ``list_storages()`` report used, allocated,
-available, and filesystem-free bytes. ``save_upload`` raises
-``InsufficientStorageError`` when a quota or usable filesystem limit would be
-exceeded, ``UnsupportedFileTypeError`` for a disallowed or mismatched type, and
-``InvalidUploadError`` for empty, malformed, or invalid text input.
+3. Make folders through the manager so they are recorded in the index. Paths
+   are relative to the selected storage root; parent folders are created and
+   indexed as needed:
 
-Run the storage tests from the repository root with:
+       await storage.async_add_directory(
+           "shows/space-opera", storage_id=archive_id
+       )
+
+4. Pass FastAPI's ``UploadFile`` (or another async object with ``read(size)``)
+   directly to ``save_upload``. You can select an existing indexed destination
+   directory. The original client filename is used only to select an allowed
+   extension; the stored filename is random and cannot contain client path
+   components:
+
+       stored = await storage.save_upload(
+           upload=upload_file,
+           filename=upload_file.filename or "",
+           storage_id=archive_id,
+           directory="shows/space-opera",
+       )
+
+   ``stored.filename`` is the generated basename. ``stored.path`` is the
+   absolute local path, ``stored.storage_id`` identifies the root, and
+   ``stored.media_type``, ``stored.size_bytes``, and ``stored.sha256`` describe
+   the accepted content. Persist the storage ID and generated filename (or a
+   relative path) in the application's SQL database; do not treat the local
+   absolute path as a portable URL. The manager's SQLite database is only its
+   filesystem index and does not replace the application's SQL database.
+
+5. Inspect indexed contents, quota, and reconciliation results:
+
+       entries = await storage.async_list_entries(storage_id=archive_id)
+       info = await storage.async_get_storage(archive_id)
+       print(info.used_bytes, info.available_bytes)
+       report = await storage.async_reconcile_storage(archive_id)
+       print(report.removed_count, report.indexed_count)
+
+   Every listed entry is a ``StorageEntry`` with a root-relative POSIX path,
+   kind, byte size, and modification time. The root directory itself has the
+   empty relative path. ``list_entries`` reconciles before returning, so
+   external/unindexed additions are purged first. Reconciliation also removes
+   stale index rows for files that were externally deleted.
+
+6. Delete entries with ``remove``. Directories are recursively removed by
+   default; set ``recursive=False`` to reject a non-empty directory:
+
+       await storage.async_remove(
+           "shows/space-opera/episode-01.mp4", storage_id=archive_id
+       )
+       await storage.async_remove("shows/space-opera", storage_id=archive_id)
+
+   Removing the storage root itself is prohibited. Add and delete operations
+   update disk and SQLite index under the storage lock. Keep the manager's
+   internal database and lock files in place while the location is registered.
+   The synchronous methods are useful in scripts and tests. API handlers should
+   use the corresponding ``async_*`` methods so lock waits and filesystem work
+   do not block the server's event loop.
+
+Storage exceptions
+==================
+
+``InsufficientStorageError`` means the configured allocation or available
+filesystem space (including its reserve) would be exceeded. ``InvalidUploadError``
+means the upload is empty, malformed, or invalid UTF-8 text.
+``UnsupportedFileTypeError`` means the extension is not allowed or its content
+signature does not match. ``StorageError`` reports general storage/index
+problems. Catch these at the API boundary and return an appropriate response;
+do not convert an exception into a success response.
+
+Tests and safety
+================
+
+From the repository root, run the focused tests with:
 
     cd api
     source ../.venv/bin/activate
     python -m unittest discover -s tests -p 'test_storage.py' -v
 
-The tests use temporary directories and simulated upload streams, so they
-exercise real file creation and quota checks without filling a real drive.
-This manager stores files on the filesystem; it does not connect to or test the
-SQL database.
+Tests use temporary directories and streams, so they exercise real SQLite,
+file, folder, upload, quota, removal, and reconciliation behavior without
+touching a production storage path. They do not connect to or verify the SQL
+database used by the API.
 
-Safety notes
-============
-
-Uploads are limited to recognized image/video containers and UTF-8 subtitle or
-plain-text files. This module does not decode media or scan for malware; keep
-stored files private and serve them as attachments unless a trusted media
-pipeline has processed them. Signature and boundary checks reject common
-extension/content mismatches and truncated uploads, but are not a full media
-decoder or malware scanner.
+The allowlist covers common image/video containers and UTF-8 ``.txt``, ``.srt``,
+and ``.vtt``. Extension/signature and basic boundary checks are not a full media
+decoder or malware scanner. Keep uploads private and serve them as attachments
+unless a trusted media pipeline has processed them.
 """
 
 from __future__ import annotations
@@ -73,15 +137,17 @@ import importlib
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import tempfile
+import time
 import unicodedata
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import AsyncGenerator, Protocol
+from typing import AsyncGenerator, Generator, Protocol
 
 
 _CHUNK_SIZE = 1024 * 1024
@@ -127,7 +193,61 @@ _BINARY_MULTIPLIERS = {
     "gib": 1024**3,
     "tib": 1024**4,
 }
-_STORAGE_LOCKS: dict[Path, asyncio.Lock] = {}
+_INDEX_FILENAME = ".storage-index.sqlite3"
+_LOCK_FILENAME = ".storage.lock"
+_INDEX_METADATA_NAMES = {
+    _INDEX_FILENAME,
+    f"{_INDEX_FILENAME}-journal",
+    f"{_INDEX_FILENAME}-wal",
+    f"{_INDEX_FILENAME}-shm",
+    _LOCK_FILENAME,
+}
+
+
+@contextmanager
+def _exclusive_storage_lock_sync(path: Path) -> Generator[None, None, None]:
+    lock_path = path / _LOCK_FILENAME
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    file_descriptor = os.open(lock_path, flags, 0o600)
+    locked = False
+    is_windows = os.name == "nt"
+    lock_module = importlib.import_module("msvcrt" if is_windows else "fcntl")
+
+    try:
+        if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+            raise StorageError(f"Storage lock is not a regular file: {lock_path}")
+        if is_windows and os.fstat(file_descriptor).st_size == 0:
+            os.write(file_descriptor, b"\0")
+
+        while not locked:
+            try:
+                if is_windows:
+                    os.lseek(file_descriptor, 0, os.SEEK_SET)
+                    lock_module.locking(file_descriptor, lock_module.LK_NBLCK, 1)
+                else:
+                    lock_module.flock(
+                        file_descriptor,
+                        lock_module.LOCK_EX | lock_module.LOCK_NB,
+                    )
+                locked = True
+            except BlockingIOError:
+                time.sleep(0.05)
+            except OSError as exc:
+                if not is_windows or exc.errno not in {
+                    errno.EACCES,
+                    errno.EDEADLK,
+                }:
+                    raise
+                time.sleep(0.05)
+        yield
+    finally:
+        if locked:
+            if is_windows:
+                os.lseek(file_descriptor, 0, os.SEEK_SET)
+                lock_module.locking(file_descriptor, lock_module.LK_UNLCK, 1)
+            else:
+                lock_module.flock(file_descriptor, lock_module.LOCK_UN)
+        os.close(file_descriptor)
 
 
 @asynccontextmanager
@@ -208,6 +328,22 @@ class StorageInfo:
     used_bytes: int
     available_bytes: int
     filesystem_free_bytes: int
+
+
+@dataclass(frozen=True)
+class StorageEntry:
+    storage_id: str
+    relative_path: str
+    is_directory: bool
+    size_bytes: int
+    modified_ns: int
+
+
+@dataclass(frozen=True)
+class ReconcileReport:
+    storage_id: str
+    indexed_count: int
+    removed_count: int
 
 
 @dataclass(frozen=True)
@@ -435,23 +571,111 @@ class StorageManager:
         os.close(probe_fd)
         Path(probe_name).unlink()
 
-        self._locations[identifier] = _StorageLocation(
+        location = _StorageLocation(
             identifier,
             resolved_path,
             allocation_bytes,
-            _STORAGE_LOCKS.setdefault(resolved_path, asyncio.Lock()),
+            asyncio.Lock(),
         )
+        with _exclusive_storage_lock_sync(resolved_path):
+            self._initialize_index(location)
+            self._reconcile_locked(location)
+
+        self._locations[identifier] = location
         self._paths.add(resolved_path)
         return identifier
 
+    async def async_add_storage(
+        self,
+        path: str | Path,
+        allocation: int | str | None = None,
+        *,
+        storage_id: str | None = None,
+    ) -> str:
+        """Async-friendly version of ``add_storage`` for API handlers."""
+        return await asyncio.to_thread(
+            self.add_storage,
+            path,
+            allocation,
+            storage_id=storage_id,
+        )
+
     def list_storages(self) -> list[StorageInfo]:
         return [
-            self._storage_info(location)
+            self.get_storage(location.storage_id)
             for location in self._locations.values()
         ]
 
+    async def async_list_storages(self) -> list[StorageInfo]:
+        """Async-friendly version of ``list_storages`` for API handlers."""
+        return await asyncio.to_thread(self.list_storages)
+
     def get_storage(self, storage_id: str) -> StorageInfo:
-        return self._storage_info(self._get_location(storage_id))
+        location = self._get_location(storage_id)
+        with _exclusive_storage_lock_sync(location.path):
+            self._reconcile_locked(location)
+            return self._storage_info(location)
+
+    async def async_get_storage(self, storage_id: str) -> StorageInfo:
+        """Async-friendly version of ``get_storage`` for API handlers."""
+        return await asyncio.to_thread(self.get_storage, storage_id)
+
+    def add_directory(
+        self,
+        relative_path: str,
+        *,
+        storage_id: str | None = None,
+    ) -> StorageEntry:
+        """Create and index a directory and any missing parent directories."""
+        location = self._get_location(storage_id or self.default_storage_id)
+        parts = self._parse_relative_path(relative_path)
+
+        with _exclusive_storage_lock_sync(location.path):
+            self._reconcile_locked(location)
+            current = location.path
+            entries: list[tuple[str, Path]] = []
+            for part in parts:
+                current = current / part
+                relative = current.relative_to(location.path).as_posix()
+                if current.exists():
+                    if current.is_symlink() or not current.is_dir():
+                        raise StorageError(
+                            f"Cannot create directory over an existing entry: {relative}"
+                        )
+                else:
+                    current.mkdir()
+                    entries.append((relative, current))
+
+            if entries:
+                try:
+                    with self._connection(location) as connection:
+                        for relative, path in entries:
+                            info = path.stat(follow_symlinks=False)
+                            connection.execute(
+                                """
+                                INSERT INTO entries
+                                    (relative_path, kind, size_bytes, modified_ns)
+                                VALUES (?, 'directory', 0, ?)
+                                """,
+                                (relative, info.st_mtime_ns),
+                            )
+                except Exception:
+                    for _, path in reversed(entries):
+                        path.rmdir()
+                    raise
+
+            return self._entry_for_path(location, current)
+
+    async def async_add_directory(
+        self,
+        relative_path: str,
+        *,
+        storage_id: str | None = None,
+    ) -> StorageEntry:
+        """Async-friendly version of ``add_directory`` for API handlers."""
+        return await asyncio.to_thread(
+            self.add_directory, relative_path, storage_id=storage_id
+        )
 
     async def save_upload(
         self,
@@ -459,14 +683,25 @@ class StorageManager:
         filename: str,
         *,
         storage_id: str | None = None,
+        directory: str | None = None,
     ) -> StoredObject:
-        """Validate and stream an upload into a storage location without trusting its name."""
+        """Validate, stream, and index an upload without trusting its name."""
         location = self._get_location(storage_id or self.default_storage_id)
         extension = self._get_extension(filename)
+        relative_directory = ""
+        if directory is not None:
+            relative_directory = "/".join(self._parse_relative_path(directory))
 
         async with location.lock, _exclusive_storage_lock(location.path):
-            used_bytes = self._used_bytes(location.path)
+            self._reconcile_locked(location)
+            used_bytes = self._used_bytes(location)
             self._check_capacity(location, used_bytes, 1)
+
+            destination_directory = location.path / relative_directory
+            if not destination_directory.is_dir() or destination_directory.is_symlink():
+                raise StorageError(
+                    f"Upload destination is not an indexed directory: {relative_directory}"
+                )
 
             first_chunk_parts: list[bytes] = []
             first_chunk_size = 0
@@ -485,9 +720,9 @@ class StorageManager:
             validator.feed(first_chunk)
 
             stored_filename = f"{uuid.uuid4().hex}{extension}"
-            destination = location.path / stored_filename
+            destination = destination_directory / stored_filename
             file_descriptor, temporary_name = tempfile.mkstemp(
-                prefix=".upload-", suffix=".tmp", dir=location.path
+                prefix=".upload-", suffix=".tmp", dir=destination_directory
             )
             temporary_path = Path(temporary_name)
             digest = hashlib.sha256()
@@ -515,6 +750,21 @@ class StorageManager:
                     os.fsync(output.fileno())
 
                 os.replace(temporary_path, destination)
+                relative_path = destination.relative_to(location.path).as_posix()
+                try:
+                    info = destination.stat(follow_symlinks=False)
+                    with self._connection(location) as connection:
+                        connection.execute(
+                            """
+                            INSERT INTO entries
+                                (relative_path, kind, size_bytes, modified_ns)
+                            VALUES (?, 'file', ?, ?)
+                            """,
+                            (relative_path, total_bytes, info.st_mtime_ns),
+                        )
+                except Exception:
+                    destination.unlink(missing_ok=True)
+                    raise
             except OSError as exc:
                 if exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
                     raise InsufficientStorageError(
@@ -533,11 +783,386 @@ class StorageManager:
                 sha256=digest.hexdigest(),
             )
 
+    def list_entries(
+        self,
+        *,
+        storage_id: str | None = None,
+        recursive: bool = True,
+        include_root: bool = True,
+    ) -> list[StorageEntry]:
+        """List indexed files and directories, reconciling unindexed content first."""
+        location = self._get_location(storage_id or self.default_storage_id)
+        with _exclusive_storage_lock_sync(location.path):
+            self._reconcile_locked(location)
+            query = """
+                SELECT relative_path, kind, size_bytes, modified_ns
+                FROM entries
+            """
+            conditions: list[str] = []
+            if not include_root:
+                conditions.append("relative_path != ''")
+            if not recursive:
+                conditions.append("instr(relative_path, '/') = 0")
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY relative_path"
+            with self._connection(location) as connection:
+                rows = connection.execute(query).fetchall()
+            return [
+                StorageEntry(
+                    storage_id=location.storage_id,
+                    relative_path=row["relative_path"],
+                    is_directory=row["kind"] == "directory",
+                    size_bytes=row["size_bytes"],
+                    modified_ns=row["modified_ns"],
+                )
+                for row in rows
+            ]
+
+    async def async_list_entries(
+        self,
+        *,
+        storage_id: str | None = None,
+        recursive: bool = True,
+        include_root: bool = True,
+    ) -> list[StorageEntry]:
+        """Async-friendly version of ``list_entries`` for API handlers."""
+        return await asyncio.to_thread(
+            self.list_entries,
+            storage_id=storage_id,
+            recursive=recursive,
+            include_root=include_root,
+        )
+
+    def remove(
+        self,
+        relative_path: str,
+        *,
+        storage_id: str | None = None,
+        recursive: bool = True,
+    ) -> None:
+        """Remove an indexed file or directory and its corresponding index rows."""
+        location = self._get_location(storage_id or self.default_storage_id)
+        parts = self._parse_relative_path(relative_path)
+        normalized = "/".join(parts)
+        target = location.path.joinpath(*parts)
+
+        with _exclusive_storage_lock_sync(location.path):
+            self._reconcile_locked(location)
+            with self._connection(location) as connection:
+                row = connection.execute(
+                    "SELECT kind FROM entries WHERE relative_path = ?",
+                    (normalized,),
+                ).fetchone()
+                if row is None:
+                    raise StorageError(f"Storage entry does not exist: {normalized}")
+                if row["kind"] == "directory":
+                    children = connection.execute(
+                        "SELECT relative_path FROM entries"
+                    ).fetchall()
+                    has_children = any(
+                        child["relative_path"].startswith(normalized + "/")
+                        for child in children
+                    )
+                    if has_children and not recursive:
+                        raise StorageError(
+                            f"Directory is not empty: {normalized}"
+                        )
+
+            if target.is_symlink():
+                target.unlink()
+            elif target.is_dir():
+                if recursive:
+                    shutil.rmtree(target)
+                else:
+                    target.rmdir()
+            else:
+                target.unlink()
+
+            with self._connection(location) as connection:
+                paths = connection.execute(
+                    "SELECT relative_path FROM entries"
+                ).fetchall()
+                for row in paths:
+                    indexed_path = row["relative_path"]
+                    if (
+                        indexed_path == normalized
+                        or indexed_path.startswith(normalized + "/")
+                    ):
+                        connection.execute(
+                            "DELETE FROM entries WHERE relative_path = ?",
+                            (indexed_path,),
+                        )
+
+    async def async_remove(
+        self,
+        relative_path: str,
+        *,
+        storage_id: str | None = None,
+        recursive: bool = True,
+    ) -> None:
+        """Async-friendly version of ``remove`` for API handlers."""
+        await asyncio.to_thread(
+            self.remove,
+            relative_path,
+            storage_id=storage_id,
+            recursive=recursive,
+        )
+
+    def reconcile_storage(
+        self, storage_id: str | None = None
+    ) -> ReconcileReport:
+        """Delete unindexed filesystem entries and prune stale rows in the index."""
+        location = self._get_location(storage_id or self.default_storage_id)
+        with _exclusive_storage_lock_sync(location.path):
+            return self._reconcile_locked(location)
+
+    async def async_reconcile_storage(
+        self, storage_id: str | None = None
+    ) -> ReconcileReport:
+        """Async-friendly version of ``reconcile_storage`` for API handlers."""
+        return await asyncio.to_thread(self.reconcile_storage, storage_id)
+
     def _get_location(self, storage_id: str) -> _StorageLocation:
         try:
             return self._locations[storage_id]
         except KeyError as exc:
             raise StorageError(f"Unknown storage ID: {storage_id}") from exc
+
+    @staticmethod
+    def _parse_relative_path(relative_path: str) -> tuple[str, ...]:
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or "\x00" in relative_path
+            or "\\" in relative_path
+        ):
+            raise ValueError("Storage paths must be non-empty relative POSIX paths.")
+        path = Path(relative_path)
+        if path.is_absolute():
+            raise ValueError("Storage paths must be relative to their storage root.")
+        parts = tuple(relative_path.split("/"))
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("Storage paths cannot contain empty or traversal segments.")
+        if parts[0] in _INDEX_METADATA_NAMES or parts[0].startswith(".upload-"):
+            raise ValueError("Storage path is reserved for internal storage metadata.")
+        return parts
+
+    @staticmethod
+    def _connect_index(location: _StorageLocation) -> sqlite3.Connection:
+        index_path = location.path / _INDEX_FILENAME
+        if index_path.is_symlink():
+            raise StorageError(f"Storage index cannot be a symlink: {index_path}")
+        connection = sqlite3.connect(index_path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    @staticmethod
+    @contextmanager
+    def _connection(
+        location: _StorageLocation,
+    ) -> Generator[sqlite3.Connection, None, None]:
+        try:
+            connection = StorageManager._connect_index(location)
+        except sqlite3.DatabaseError as exc:
+            raise StorageError(f"Could not open storage index: {exc}") from exc
+        try:
+            with connection:
+                yield connection
+        except sqlite3.DatabaseError as exc:
+            raise StorageError(f"Could not use storage index: {exc}") from exc
+        finally:
+            connection.close()
+
+    def _initialize_index(self, location: _StorageLocation) -> None:
+        index_path = location.path / _INDEX_FILENAME
+        if index_path.is_symlink():
+            raise StorageError(f"Storage index cannot be a symlink: {index_path}")
+        try:
+            with self._connection(location) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if version not in {0, 1}:
+                    raise StorageError(
+                        f"Unsupported storage index version {version}: {index_path}"
+                    )
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+                if integrity != "ok":
+                    raise StorageError(
+                        f"Storage index integrity check failed: {integrity}"
+                    )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS entries (
+                        relative_path TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL CHECK (kind IN ('file', 'directory')),
+                        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                        modified_ns INTEGER NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entries_kind ON entries(kind)"
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO entries "
+                    "(relative_path, kind, size_bytes, modified_ns) "
+                    "VALUES ('', 'directory', 0, ?)",
+                    (location.path.stat().st_mtime_ns,),
+                )
+                connection.execute("PRAGMA user_version = 1")
+        except sqlite3.DatabaseError as exc:
+            raise StorageError(
+                f"Could not read or initialize storage index {index_path}: {exc}"
+            ) from exc
+
+    def _reconcile_locked(self, location: _StorageLocation) -> ReconcileReport:
+        with self._connection(location) as connection:
+            indexed = {
+                row["relative_path"]: row["kind"]
+                for row in connection.execute(
+                    "SELECT relative_path, kind FROM entries"
+                ).fetchall()
+            }
+
+        actual: dict[str, tuple[str, int, int]] = {}
+        special_paths: set[str] = set()
+        pending = [(location.path, "")]
+        while pending:
+            directory, parent = pending.pop()
+            with os.scandir(directory) as children:
+                for child in children:
+                    if not parent and child.name in _INDEX_METADATA_NAMES:
+                        continue
+                    relative_path = (
+                        f"{parent}/{child.name}" if parent else child.name
+                    )
+                    if child.is_symlink():
+                        special_paths.add(relative_path)
+                        actual[relative_path] = ("symlink", 0, 0)
+                    elif child.is_dir(follow_symlinks=False):
+                        info = child.stat(follow_symlinks=False)
+                        actual[relative_path] = (
+                            "directory",
+                            0,
+                            info.st_mtime_ns,
+                        )
+                        pending.append((Path(child.path), relative_path))
+                    elif child.is_file(follow_symlinks=False):
+                        info = child.stat(follow_symlinks=False)
+                        actual[relative_path] = (
+                            "file",
+                            info.st_size,
+                            info.st_mtime_ns,
+                        )
+                    else:
+                        special_paths.add(relative_path)
+                        actual[relative_path] = ("special", 0, 0)
+
+        purge_paths = {
+            relative_path
+            for relative_path, (kind, _, _) in actual.items()
+            if relative_path in special_paths
+            or relative_path not in indexed
+            or indexed[relative_path] != kind
+        }
+        for relative_path in actual:
+            parts = relative_path.split("/")
+            if any(
+                "/".join(parts[:index]) in purge_paths
+                for index in range(1, len(parts))
+            ):
+                purge_paths.add(relative_path)
+
+        for relative_path in sorted(
+            purge_paths, key=lambda item: (item.count("/"), item), reverse=True
+        ):
+            path = location.path.joinpath(*relative_path.split("/"))
+            try:
+                if path.is_symlink() or not path.is_dir():
+                    path.unlink(missing_ok=True)
+                else:
+                    path.rmdir()
+            except OSError as exc:
+                raise StorageError(
+                    f"Could not remove unindexed storage entry {relative_path}: {exc}"
+                ) from exc
+
+        valid_actual = {
+            path: record
+            for path, record in actual.items()
+            if path not in purge_paths
+        }
+        root_modified_ns = location.path.stat().st_mtime_ns
+        with self._connection(location) as connection:
+            current_paths = {
+                row["relative_path"]
+                for row in connection.execute(
+                    "SELECT relative_path FROM entries"
+                ).fetchall()
+            }
+            valid_paths = set(valid_actual) | {""}
+            stale_paths = current_paths - valid_paths
+            for stale_path in stale_paths:
+                connection.execute(
+                    "DELETE FROM entries WHERE relative_path = ?",
+                    (stale_path,),
+                )
+            connection.execute(
+                """
+                INSERT INTO entries
+                    (relative_path, kind, size_bytes, modified_ns)
+                VALUES ('', 'directory', 0, ?)
+                ON CONFLICT(relative_path) DO UPDATE SET
+                    kind = 'directory', size_bytes = 0, modified_ns = excluded.modified_ns
+                """,
+                (root_modified_ns,),
+            )
+            for relative_path, (kind, size_bytes, modified_ns) in valid_actual.items():
+                connection.execute(
+                    """
+                    INSERT INTO entries
+                        (relative_path, kind, size_bytes, modified_ns)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(relative_path) DO UPDATE SET
+                        kind = excluded.kind,
+                        size_bytes = excluded.size_bytes,
+                        modified_ns = excluded.modified_ns
+                    """,
+                    (relative_path, kind, size_bytes, modified_ns),
+                )
+            indexed_count = connection.execute(
+                "SELECT COUNT(*) FROM entries"
+            ).fetchone()[0]
+
+        return ReconcileReport(
+            storage_id=location.storage_id,
+            indexed_count=indexed_count,
+            removed_count=len(purge_paths | stale_paths),
+        )
+
+    @staticmethod
+    def _entry_for_path(
+        location: _StorageLocation, path: Path
+    ) -> StorageEntry:
+        relative_path = (
+            "" if path == location.path else path.relative_to(location.path).as_posix()
+        )
+        with StorageManager._connection(location) as connection:
+            row = connection.execute(
+                "SELECT kind, size_bytes, modified_ns FROM entries "
+                "WHERE relative_path = ?",
+                (relative_path,),
+            ).fetchone()
+        if row is None:
+            raise StorageError(f"Storage entry was not indexed: {relative_path}")
+        return StorageEntry(
+            storage_id=location.storage_id,
+            relative_path=relative_path,
+            is_directory=row["kind"] == "directory",
+            size_bytes=row["size_bytes"],
+            modified_ns=row["modified_ns"],
+        )
 
     @staticmethod
     def _get_extension(filename: str) -> str:
@@ -573,7 +1198,7 @@ class StorageManager:
             )
 
     def _storage_info(self, location: _StorageLocation) -> StorageInfo:
-        used_bytes = self._used_bytes(location.path)
+        used_bytes = self._used_bytes(location)
         filesystem_free_bytes = shutil.disk_usage(location.path).free
         quota_free_bytes = (
             filesystem_free_bytes
@@ -594,19 +1219,8 @@ class StorageManager:
         )
 
     @staticmethod
-    def _used_bytes(root: Path) -> int:
-        total = 0
-        pending = [root]
-        while pending:
-            directory = pending.pop()
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    if entry.name == ".storage.lock":
-                        continue
-                    if entry.is_symlink():
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False):
-                        total += entry.stat(follow_symlinks=False).st_size
-        return total
+    def _used_bytes(location: _StorageLocation) -> int:
+        with StorageManager._connection(location) as connection:
+            return connection.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM entries WHERE kind = 'file'"
+            ).fetchone()[0]
