@@ -3,6 +3,8 @@
 """
 from contextlib import asynccontextmanager
 import logging
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, Request
@@ -51,6 +53,34 @@ configure_logging(
     )
 )
 
+# Keep storage diagnostics out of the API log and console.
+storage_logger = logging.getLogger(f"{settings.APP_NAME}.storage")
+storage_logger.setLevel(logging.DEBUG if settings.DEBUG else logging.INFO)
+storage_logger.propagate = False
+
+for handler in storage_logger.handlers[:]:
+    if getattr(handler, "_anime_streamer_storage_handler", False):
+        storage_logger.removeHandler(handler)
+        handler.close()
+
+storage_log_directory = Path(".logs")
+storage_log_directory.mkdir(parents=True, exist_ok=True)
+storage_file_handler = TimedRotatingFileHandler(
+    storage_log_directory / "storage.log",
+    when="midnight",
+    interval=1,
+    backupCount=3,
+    encoding="utf-8",
+)
+storage_file_handler.setLevel(logging.DEBUG if settings.DEBUG else logging.INFO)
+storage_file_handler.setFormatter(
+    logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
+    )
+)
+setattr(storage_file_handler, "_anime_streamer_storage_handler", True)
+storage_logger.addHandler(storage_file_handler)
+
 logging.getLogger("sqlalchemy.engine").setLevel(
     logging.INFO if settings.DEBUG else logging.WARNING
 )
@@ -58,7 +88,10 @@ logging.getLogger("sqlalchemy.engine").setLevel(
 # storage manager initialzation
 storage = StorageManager(
     default_path=".localDevStorage" if settings.ENVIRONMENT == "development" else ".localStorage",
-    default_allocation="10 GiB"
+    default_allocation="10 GiB",
+    debug=settings.DEBUG,
+    print_debug=False,
+    logger=storage_logger,
 )
 
 # Uvicorn's default handlers bypass the root logger. Forward its server logs
@@ -160,6 +193,8 @@ async def lifespan(app: FastAPI):
 
     logger.info("Backend API Initialized!")
     yield
+
+    await storage.async_close()
 
     logger.info("Stopping/dispossing Database")
     await engine.dispose()

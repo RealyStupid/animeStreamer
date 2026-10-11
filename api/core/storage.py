@@ -8,20 +8,59 @@ Quick start
    path can point to another mounted drive. Adding a location creates the
    directory, a small SQLite index at its root, and a lock file used to
    coordinate concurrent writers:
-
        from core.storage import StorageManager
 
        storage = StorageManager(
            default_path=".localstorage",
            default_allocation="500 GiB",
+           reconciliation_interval_seconds=5,
+           debug=True,
+           print_debug=False,
+           logger=my_storage_logger,
        )
+
+   For FastAPI, keep one manager on ``app.state`` and stop its monitor during
+   application shutdown:
+
+       from contextlib import asynccontextmanager
+       from fastapi import FastAPI
+       from core.storage import StorageManager
+
+       @asynccontextmanager
+       async def lifespan(app: FastAPI):
+           storage_logger = get_logger("core.storage")
+           app.state.storage = StorageManager(
+               ".localstorage",
+               "500 GiB",
+               reconciliation_interval_seconds=5,
+               debug=settings.DEBUG,
+               logger=storage_logger,
+           )
+           try:
+               yield
+           finally:
+               await app.state.storage.async_close()
+
+       app = FastAPI(lifespan=lifespan)
 
    The first time a location is registered, every existing entry not already
    recorded in its SQLite index is deleted. Back up or move anything you want
    to keep before registering an existing directory. The index database,
    SQLite sidecars, and lock file are internal metadata and are not storage
-   entries. Later, files or folders created outside this manager are also
-   removed during the next reconciliation or manager operation.
+   entries. A background monitor then reconciles every registered root on a
+   timer; by default, unindexed files/folders created outside this manager are
+   removed within about five seconds. Set
+   ``reconciliation_interval_seconds=None`` to disable the monitor (manual
+   reconciliation still works). Always call ``storage.close()`` during API
+   shutdown so the monitor thread exits.
+
+   ``debug=True`` enables detailed operation traces. ``print_debug=True`` also
+   prints those DEBUG messages to stdout (leave it false for normal servers).
+   Pass any logger implementing the standard ``debug/info/warning/error/
+   exception`` methods to route storage logs through your application's
+   handlers. The same logger and flags are shared with every added storage
+   root. You can toggle ``storage.debug`` or ``storage.print_debug`` later;
+   changes apply to already-registered roots and the background monitor.
 
 2. Optionally register more locations, for example a directory on a separate
    disk. Each storage location has its own index and quota:
@@ -81,6 +120,47 @@ Quick start
    external/unindexed additions are purged first. Reconciliation also removes
    stale index rows for files that were externally deleted.
 
+   The background monitor runs separately from API requests. It logs
+   reconciliation errors and retries on the next interval; errors in explicit
+   reconciliation calls are raised to the caller.
+
+   Storage diagnostics use one shared logger for every registered location.
+   The logger is independent of the API logger, so storage messages do not
+   clutter the main API log. Configure detailed traces or console printing:
+
+       import logging
+       from core.logging import get_logger
+
+       from logging.handlers import TimedRotatingFileHandler
+
+       storage_logger = logging.getLogger("api.storage")
+       storage_logger.setLevel(logging.DEBUG)
+       storage_logger.propagate = False
+       file_handler = TimedRotatingFileHandler(
+           ".logs/storage.log",
+           when="midnight",
+           backupCount=3,
+           encoding="utf-8",
+       )
+       file_handler.setFormatter(logging.Formatter(
+           "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
+       ))
+       storage_logger.addHandler(file_handler)
+       storage.debug = True          # detailed DEBUG messages via logger
+       storage.print_debug = True    # also print DEBUG messages to stdout
+       storage.logger = storage_logger
+
+   Alternatively, pass ``debug=True``, ``print_debug=True``, and/or
+   ``logger=storage_logger`` to ``StorageManager`` at construction. Logger
+   messages include manager startup/shutdown, roots and quotas, SQLite index
+   setup, upload stages and size/hash, capacity checks, directory and entry
+   operations, reconciliation counts/removals, and monitor errors. Upload
+   contents are never logged. ``print_debug`` is off by default; normal
+   INFO/WARNING/ERROR messages always go only to the configured logger. To
+   store them in a separate file, attach a file handler to this named logger
+   and set ``propagate=False``; the API application configures
+   ``.logs/storage.log`` with daily rotation and three backups.
+
 6. Delete entries with ``remove``. Directories are recursively removed by
    default; set ``recursive=False`` to reject a non-empty directory:
 
@@ -134,12 +214,14 @@ import codecs
 import errno
 import hashlib
 import importlib
+import logging
 import os
 import re
 import shutil
 import sqlite3
 import stat
 import tempfile
+import threading
 import time
 import unicodedata
 import uuid
@@ -320,6 +402,46 @@ class AsyncReadable(Protocol):
     async def read(self, size: int = -1) -> bytes: ...
 
 
+class StorageLogger(Protocol):
+    """Logger interface accepted by ``StorageManager``."""
+
+    def debug(self, message: str, *args: object, **kwargs: object) -> None: ...
+
+    def info(self, message: str, *args: object, **kwargs: object) -> None: ...
+
+    def warning(self, message: str, *args: object, **kwargs: object) -> None: ...
+
+    def error(self, message: str, *args: object, **kwargs: object) -> None: ...
+
+    def exception(self, message: str, *args: object, **kwargs: object) -> None: ...
+
+
+@dataclass
+class _StorageLogging:
+    logger: StorageLogger
+    debug: bool
+    print_debug: bool
+
+    def debug_message(self, message: str, *args: object) -> None:
+        if not (self.debug or self.print_debug):
+            return
+        self.logger.debug(message, *args)
+        if self.print_debug:
+            print("[storage DEBUG] " + (message % args if args else message))
+
+    def info(self, message: str, *args: object) -> None:
+        self.logger.info(message, *args)
+
+    def warning(self, message: str, *args: object) -> None:
+        self.logger.warning(message, *args)
+
+    def error(self, message: str, *args: object) -> None:
+        self.logger.error(message, *args)
+
+    def exception(self, message: str, *args: object) -> None:
+        self.logger.exception(message, *args)
+
+
 @dataclass(frozen=True)
 class StorageInfo:
     storage_id: str
@@ -362,6 +484,7 @@ class _StorageLocation:
     path: Path
     allocation_bytes: int | None
     lock: asyncio.Lock
+    logging: _StorageLogging
 
 
 def parse_size(value: int | str) -> int:
@@ -530,13 +653,116 @@ class StorageManager:
         default_allocation: int | str | None = None,
         *,
         minimum_free_bytes: int | str = _DEFAULT_MINIMUM_FREE_BYTES,
+        reconciliation_interval_seconds: float | None = 5.0,
+        debug: bool = False,
+        print_debug: bool = False,
+        logger: StorageLogger | None = None,
     ) -> None:
+        if reconciliation_interval_seconds is not None and (
+            not isinstance(reconciliation_interval_seconds, (int, float))
+            or isinstance(reconciliation_interval_seconds, bool)
+            or not 0 < reconciliation_interval_seconds < float("inf")
+        ):
+            raise ValueError(
+                "Reconciliation interval must be a positive finite number or None."
+            )
+        if not isinstance(debug, bool) or not isinstance(print_debug, bool):
+            raise ValueError("debug and print_debug must be boolean values.")
+        if logger is not None and not all(
+            callable(getattr(logger, method, None))
+            for method in ("debug", "info", "warning", "error", "exception")
+        ):
+            raise TypeError(
+                "logger must provide debug, info, warning, error, and exception methods."
+            )
         self.minimum_free_bytes = parse_size(minimum_free_bytes)
+        self._logging = _StorageLogging(
+            logger=(
+                logger
+                if logger is not None
+                else logging.getLogger("core.storage")
+            ),
+            debug=debug,
+            print_debug=print_debug,
+        )
         self._locations: dict[str, _StorageLocation] = {}
         self._paths: set[Path] = set()
+        self._registry_lock = threading.RLock()
+        self._reconciliation_interval_seconds = reconciliation_interval_seconds
+        self._stop_monitor = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
+        self._log_debug(
+            "Creating storage manager (default_path=%s, allocation_bytes=%s, "
+            "reconciliation_interval_seconds=%s, debug=%s, print_debug=%s).",
+            default_path,
+            None if default_allocation is None else parse_size(default_allocation),
+            reconciliation_interval_seconds,
+            debug,
+            print_debug,
+        )
         self.default_storage_id = self.add_storage(
             default_path, default_allocation
         )
+        if reconciliation_interval_seconds is not None:
+            self._monitor_thread = threading.Thread(
+                target=self._monitor_storage_roots,
+                name="local-storage-reconciler",
+                daemon=True,
+            )
+            self._monitor_thread.start()
+            self._log_debug(
+                "Started reconciliation monitor thread '%s'.",
+                self._monitor_thread.name,
+            )
+        self._logging.info(
+            "Storage manager ready (default_storage_id='%s', debug=%s, "
+            "print_debug=%s, reconciliation_interval_seconds=%s).",
+            self.default_storage_id,
+            self.debug,
+            self.print_debug,
+            reconciliation_interval_seconds,
+        )
+
+    @property
+    def logger(self) -> StorageLogger:
+        """Logger shared by the manager, all registered roots, and its monitor."""
+        return self._logging.logger
+
+    @logger.setter
+    def logger(self, value: StorageLogger) -> None:
+        if not all(
+            callable(getattr(value, method, None))
+            for method in ("debug", "info", "warning", "error", "exception")
+        ):
+            raise TypeError(
+                "logger must provide debug, info, warning, error, and exception methods."
+            )
+        self._logging.logger = value
+
+    @property
+    def debug(self) -> bool:
+        """Whether to emit detailed storage operations at DEBUG level."""
+        return self._logging.debug
+
+    @debug.setter
+    def debug(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise ValueError("debug must be a boolean value.")
+        self._logging.debug = value
+
+    @property
+    def print_debug(self) -> bool:
+        """Whether to print detailed DEBUG messages to stdout as well as log."""
+        return self._logging.print_debug
+
+    @print_debug.setter
+    def print_debug(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise ValueError("print_debug must be a boolean value.")
+        self._logging.print_debug = value
+
+    def _log_debug(self, message: str, *args: object) -> None:
+        self._logging.debug_message(message, *args)
 
     def add_storage(
         self,
@@ -553,14 +779,23 @@ class StorageManager:
             raise StorageError(f"Storage path is not a directory: {resolved_path}")
 
         identifier = storage_id or resolved_path.name or "storage"
+        self._log_debug(
+            "Registering storage '%s' at %s (allocation=%s).",
+            identifier,
+            resolved_path,
+            "unlimited" if allocation is None else parse_size(allocation),
+        )
         if not _STORAGE_ID_RE.fullmatch(identifier):
             raise ValueError(
                 "Storage IDs must contain only letters, digits, '.', '_' or '-'."
             )
-        if identifier in self._locations:
-            raise ValueError(f"Storage ID already exists: {identifier}")
-        if resolved_path in self._paths:
-            raise ValueError(f"Storage path is already registered: {resolved_path}")
+        with self._registry_lock:
+            if identifier in self._locations:
+                raise ValueError(f"Storage ID already exists: {identifier}")
+            if resolved_path in self._paths:
+                raise ValueError(
+                    f"Storage path is already registered: {resolved_path}"
+                )
 
         allocation_bytes = (
             None if allocation is None else parse_size(allocation)
@@ -576,14 +811,87 @@ class StorageManager:
             resolved_path,
             allocation_bytes,
             asyncio.Lock(),
+            self._logging,
         )
         with _exclusive_storage_lock_sync(resolved_path):
             self._initialize_index(location)
-            self._reconcile_locked(location)
+            report = self._reconcile_locked(location)
 
-        self._locations[identifier] = location
-        self._paths.add(resolved_path)
+        with self._registry_lock:
+            self._locations[identifier] = location
+            self._paths.add(resolved_path)
+        self._logging.info(
+            "Registered storage '%s' at %s (allocation=%s bytes, indexed=%s, "
+            "removed_unindexed=%s).",
+            identifier,
+            resolved_path,
+            allocation_bytes,
+            report.indexed_count,
+            report.removed_count,
+        )
         return identifier
+
+    def close(self) -> None:
+        """Stop the periodic reconciliation monitor and wait for its current pass."""
+        self._log_debug("Stopping storage manager reconciliation monitor.")
+        self._stop_monitor.set()
+        if self._monitor_thread is not None:
+            self._monitor_thread.join(timeout=10)
+            if self._monitor_thread.is_alive():
+                raise StorageError(
+                    "The storage reconciliation monitor did not stop within 10 seconds."
+                )
+            self._monitor_thread = None
+        self._logging.info("Storage manager closed.")
+
+    async def async_close(self) -> None:
+        """Async-friendly version of ``close`` for API shutdown hooks."""
+        await asyncio.to_thread(self.close)
+
+    def __enter__(self) -> StorageManager:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    async def __aenter__(self) -> StorageManager:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.async_close()
+
+    def _monitor_storage_roots(self) -> None:
+        interval = self._reconciliation_interval_seconds
+        if interval is None:
+            return
+        while not self._stop_monitor.wait(interval):
+            with self._registry_lock:
+                locations = tuple(self._locations.values())
+            self._log_debug(
+                "Automatic reconciliation cycle started for %d storage root(s).",
+                len(locations),
+            )
+            for location in locations:
+                if self._stop_monitor.is_set():
+                    return
+                try:
+                    with _exclusive_storage_lock_sync(location.path):
+                        report = self._reconcile_locked(location)
+                    location.logging.debug_message(
+                        "Automatic reconciliation completed for '%s': "
+                        "indexed=%d, removed=%d.",
+                        location.storage_id,
+                        report.indexed_count,
+                        report.removed_count,
+                    )
+                except Exception:
+                    location.logging.exception(
+                        "Automatic storage reconciliation failed for '%s' at %s; "
+                        "it will be retried after %.3g seconds.",
+                        location.storage_id,
+                        location.path,
+                        interval,
+                    )
 
     async def async_add_storage(
         self,
@@ -601,9 +909,11 @@ class StorageManager:
         )
 
     def list_storages(self) -> list[StorageInfo]:
+        with self._registry_lock:
+            storage_ids = tuple(self._locations)
         return [
-            self.get_storage(location.storage_id)
-            for location in self._locations.values()
+            self.get_storage(storage_id)
+            for storage_id in storage_ids
         ]
 
     async def async_list_storages(self) -> list[StorageInfo]:
@@ -613,8 +923,19 @@ class StorageManager:
     def get_storage(self, storage_id: str) -> StorageInfo:
         location = self._get_location(storage_id)
         with _exclusive_storage_lock_sync(location.path):
-            self._reconcile_locked(location)
-            return self._storage_info(location)
+            report = self._reconcile_locked(location)
+            info = self._storage_info(location)
+        location.logging.debug_message(
+            "Storage status for '%s': used=%d bytes, available=%d bytes, "
+            "allocation=%s, filesystem_free=%d bytes; reconciliation removed=%d.",
+            location.storage_id,
+            info.used_bytes,
+            info.available_bytes,
+            info.allocation_bytes,
+            info.filesystem_free_bytes,
+            report.removed_count,
+        )
+        return info
 
     async def async_get_storage(self, storage_id: str) -> StorageInfo:
         """Async-friendly version of ``get_storage`` for API handlers."""
@@ -629,6 +950,11 @@ class StorageManager:
         """Create and index a directory and any missing parent directories."""
         location = self._get_location(storage_id or self.default_storage_id)
         parts = self._parse_relative_path(relative_path)
+        self._log_debug(
+            "Creating indexed directory '%s' in storage '%s'.",
+            relative_path,
+            location.storage_id,
+        )
 
         with _exclusive_storage_lock_sync(location.path):
             self._reconcile_locked(location)
@@ -663,6 +989,11 @@ class StorageManager:
                     for _, path in reversed(entries):
                         path.rmdir()
                     raise
+                location.logging.info(
+                    "Created and indexed %d directory path(s) under storage '%s'.",
+                    len(entries),
+                    location.storage_id,
+                )
 
             return self._entry_for_path(location, current)
 
@@ -687,14 +1018,33 @@ class StorageManager:
     ) -> StoredObject:
         """Validate, stream, and index an upload without trusting its name."""
         location = self._get_location(storage_id or self.default_storage_id)
-        extension = self._get_extension(filename)
+        self._log_debug(
+            "Starting upload validation for storage '%s' (destination=%s).",
+            location.storage_id,
+            directory or ".",
+        )
+        try:
+            extension = self._get_extension(filename)
+        except UnsupportedFileTypeError:
+            location.logging.warning(
+                "Rejected upload for storage '%s': unsupported or mismatched file type.",
+                location.storage_id,
+            )
+            raise
         relative_directory = ""
         if directory is not None:
             relative_directory = "/".join(self._parse_relative_path(directory))
 
         async with location.lock, _exclusive_storage_lock(location.path):
-            self._reconcile_locked(location)
+            reconcile_report = self._reconcile_locked(location)
             used_bytes = self._used_bytes(location)
+            self._log_debug(
+                "Upload preflight for '%s': used=%d bytes, incoming_minimum=1, "
+                "removed_unindexed=%d.",
+                location.storage_id,
+                used_bytes,
+                reconcile_report.removed_count,
+            )
             self._check_capacity(location, used_bytes, 1)
 
             destination_directory = location.path / relative_directory
@@ -715,9 +1065,20 @@ class StorageManager:
                 first_chunk_size += len(part)
             first_chunk = b"".join(first_chunk_parts)
             if not first_chunk:
+                location.logging.warning(
+                    "Rejected empty upload for storage '%s'.",
+                    location.storage_id,
+                )
                 raise InvalidUploadError("Empty uploads are not allowed.")
-            validator = _UploadValidator(extension, first_chunk)
-            validator.feed(first_chunk)
+            try:
+                validator = _UploadValidator(extension, first_chunk)
+                validator.feed(first_chunk)
+            except InvalidUploadError:
+                location.logging.warning(
+                    "Rejected upload for storage '%s': content validation failed.",
+                    location.storage_id,
+                )
+                raise
 
             stored_filename = f"{uuid.uuid4().hex}{extension}"
             destination = destination_directory / stored_filename
@@ -739,6 +1100,16 @@ class StorageManager:
                         self._check_capacity(
                             location, used_bytes, total_bytes + len(chunk)
                         )
+                        next_total = total_bytes + len(chunk)
+                        if total_bytes == 0 or (
+                            next_total // (16 * _CHUNK_SIZE)
+                            > total_bytes // (16 * _CHUNK_SIZE)
+                        ):
+                            self._log_debug(
+                                "Upload progress in storage '%s': %d bytes written.",
+                                location.storage_id,
+                                next_total,
+                            )
                         if total_bytes:
                             validator.feed(chunk)
                         output.write(chunk)
@@ -765,16 +1136,39 @@ class StorageManager:
                 except Exception:
                     destination.unlink(missing_ok=True)
                     raise
+            except InsufficientStorageError:
+                raise
+            except InvalidUploadError:
+                location.logging.warning(
+                    "Rejected upload for storage '%s': content validation failed.",
+                    location.storage_id,
+                )
+                raise
             except OSError as exc:
                 if exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
+                    location.logging.error(
+                        "Filesystem ran out of usable space while writing an upload "
+                        "to storage '%s'.",
+                        location.storage_id,
+                    )
                     raise InsufficientStorageError(
                         "Not enough usable storage is available for this upload."
                     ) from exc
+                location.logging.exception(
+                    "Filesystem error while writing an upload to storage '%s'.",
+                    location.storage_id,
+                )
+                raise
+            except Exception:
+                location.logging.exception(
+                    "Upload failed before it could be committed to storage '%s'.",
+                    location.storage_id,
+                )
                 raise
             finally:
                 temporary_path.unlink(missing_ok=True)
 
-            return StoredObject(
+            result = StoredObject(
                 storage_id=location.storage_id,
                 path=destination,
                 filename=stored_filename,
@@ -782,6 +1176,16 @@ class StorageManager:
                 size_bytes=total_bytes,
                 sha256=digest.hexdigest(),
             )
+            location.logging.info(
+                "Stored and indexed upload in storage '%s': path=%s, "
+                "media_type=%s, size=%d bytes, sha256=%s.",
+                location.storage_id,
+                relative_path,
+                validator.media_type,
+                total_bytes,
+                result.sha256,
+            )
+            return result
 
     def list_entries(
         self,
@@ -793,7 +1197,7 @@ class StorageManager:
         """List indexed files and directories, reconciling unindexed content first."""
         location = self._get_location(storage_id or self.default_storage_id)
         with _exclusive_storage_lock_sync(location.path):
-            self._reconcile_locked(location)
+            report = self._reconcile_locked(location)
             query = """
                 SELECT relative_path, kind, size_bytes, modified_ns
                 FROM entries
@@ -808,6 +1212,15 @@ class StorageManager:
             query += " ORDER BY relative_path"
             with self._connection(location) as connection:
                 rows = connection.execute(query).fetchall()
+            location.logging.debug_message(
+                "Listed %d indexed entry/entries from storage '%s' "
+                "(recursive=%s, include_root=%s, reconciliation_removed=%d).",
+                len(rows),
+                location.storage_id,
+                recursive,
+                include_root,
+                report.removed_count,
+            )
             return [
                 StorageEntry(
                     storage_id=location.storage_id,
@@ -847,6 +1260,12 @@ class StorageManager:
         normalized = "/".join(parts)
         target = location.path.joinpath(*parts)
 
+        location.logging.debug_message(
+            "Removing indexed entry '%s' from storage '%s' (recursive=%s).",
+            normalized,
+            location.storage_id,
+            recursive,
+        )
         with _exclusive_storage_lock_sync(location.path):
             self._reconcile_locked(location)
             with self._connection(location) as connection:
@@ -893,6 +1312,11 @@ class StorageManager:
                             "DELETE FROM entries WHERE relative_path = ?",
                             (indexed_path,),
                         )
+        location.logging.info(
+            "Removed indexed entry '%s' from storage '%s'.",
+            normalized,
+            location.storage_id,
+        )
 
     async def async_remove(
         self,
@@ -914,8 +1338,20 @@ class StorageManager:
     ) -> ReconcileReport:
         """Delete unindexed filesystem entries and prune stale rows in the index."""
         location = self._get_location(storage_id or self.default_storage_id)
+        location.logging.debug_message(
+            "Starting explicit reconciliation for storage '%s' at %s.",
+            location.storage_id,
+            location.path,
+        )
         with _exclusive_storage_lock_sync(location.path):
-            return self._reconcile_locked(location)
+            report = self._reconcile_locked(location)
+        location.logging.info(
+            "Reconciled storage '%s': indexed=%d, removed=%d.",
+            location.storage_id,
+            report.indexed_count,
+            report.removed_count,
+        )
+        return report
 
     async def async_reconcile_storage(
         self, storage_id: str | None = None
@@ -924,10 +1360,11 @@ class StorageManager:
         return await asyncio.to_thread(self.reconcile_storage, storage_id)
 
     def _get_location(self, storage_id: str) -> _StorageLocation:
-        try:
-            return self._locations[storage_id]
-        except KeyError as exc:
-            raise StorageError(f"Unknown storage ID: {storage_id}") from exc
+        with self._registry_lock:
+            try:
+                return self._locations[storage_id]
+            except KeyError as exc:
+                raise StorageError(f"Unknown storage ID: {storage_id}") from exc
 
     @staticmethod
     def _parse_relative_path(relative_path: str) -> tuple[str, ...]:
@@ -977,6 +1414,9 @@ class StorageManager:
 
     def _initialize_index(self, location: _StorageLocation) -> None:
         index_path = location.path / _INDEX_FILENAME
+        location.logging.debug_message(
+            "Opening SQLite storage index at %s.", index_path
+        )
         if index_path.is_symlink():
             raise StorageError(f"Storage index cannot be a symlink: {index_path}")
         try:
@@ -1011,12 +1451,24 @@ class StorageManager:
                     (location.path.stat().st_mtime_ns,),
                 )
                 connection.execute("PRAGMA user_version = 1")
+            location.logging.debug_message(
+                "SQLite storage index initialized and verified for '%s'.",
+                location.storage_id,
+            )
         except sqlite3.DatabaseError as exc:
+            location.logging.exception(
+                "Failed to initialize SQLite storage index for '%s'.",
+                location.storage_id,
+            )
             raise StorageError(
                 f"Could not read or initialize storage index {index_path}: {exc}"
             ) from exc
 
     def _reconcile_locked(self, location: _StorageLocation) -> ReconcileReport:
+        location.logging.debug_message(
+            "Scanning storage root '%s' for filesystem/index differences.",
+            location.path,
+        )
         with self._connection(location) as connection:
             indexed = {
                 row["relative_path"]: row["kind"]
@@ -1077,6 +1529,12 @@ class StorageManager:
         for relative_path in sorted(
             purge_paths, key=lambda item: (item.count("/"), item), reverse=True
         ):
+            location.logging.debug_message(
+                "Deleting filesystem entry absent from or inconsistent with index: "
+                "%s/%s.",
+                location.path,
+                relative_path,
+            )
             path = location.path.joinpath(*relative_path.split("/"))
             try:
                 if path.is_symlink() or not path.is_dir():
@@ -1104,6 +1562,10 @@ class StorageManager:
             valid_paths = set(valid_actual) | {""}
             stale_paths = current_paths - valid_paths
             for stale_path in stale_paths:
+                location.logging.debug_message(
+                    "Removing stale index row for missing path '%s'.",
+                    stale_path or ".",
+                )
                 connection.execute(
                     "DELETE FROM entries WHERE relative_path = ?",
                     (stale_path,),
@@ -1135,11 +1597,20 @@ class StorageManager:
                 "SELECT COUNT(*) FROM entries"
             ).fetchone()[0]
 
-        return ReconcileReport(
+        report = ReconcileReport(
             storage_id=location.storage_id,
             indexed_count=indexed_count,
             removed_count=len(purge_paths | stale_paths),
         )
+        location.logging.debug_message(
+            "Storage scan complete for '%s': indexed=%d, filesystem entries "
+            "removed=%d, stale index rows removed=%d.",
+            location.storage_id,
+            report.indexed_count,
+            len(purge_paths),
+            len(stale_paths),
+        )
+        return report
 
     @staticmethod
     def _entry_for_path(
@@ -1188,11 +1659,27 @@ class StorageManager:
             location.allocation_bytes is not None
             and used_bytes + incoming_bytes > location.allocation_bytes
         ):
+            location.logging.warning(
+                "Storage quota would be exceeded for '%s': used=%d, incoming=%d, "
+                "allocation=%d bytes.",
+                location.storage_id,
+                used_bytes,
+                incoming_bytes,
+                location.allocation_bytes,
+            )
             raise InsufficientStorageError(
                 f"Storage allocation reached for '{location.storage_id}'."
             )
         free_bytes = shutil.disk_usage(location.path).free
         if free_bytes - self.minimum_free_bytes < incoming_bytes:
+            location.logging.warning(
+                "Filesystem space check failed for '%s': free=%d, reserve=%d, "
+                "incoming=%d bytes.",
+                location.storage_id,
+                free_bytes,
+                self.minimum_free_bytes,
+                incoming_bytes,
+            )
             raise InsufficientStorageError(
                 "Not enough usable filesystem space is available for this upload."
             )

@@ -1,6 +1,10 @@
 import asyncio
+import io
+import logging
 import tempfile
+import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -42,7 +46,9 @@ class StorageManagerTests(unittest.IsolatedAsyncioTestCase):
         self.manager = StorageManager(
             self.root,
             minimum_free_bytes=0,
+            reconciliation_interval_seconds=60,
         )
+        self.addCleanup(self.manager.close)
 
     @staticmethod
     def visible_contents(path: Path) -> set[str]:
@@ -94,7 +100,9 @@ class StorageManagerTests(unittest.IsolatedAsyncioTestCase):
         second_manager = StorageManager(
             self.root,
             minimum_free_bytes=0,
+            reconciliation_interval_seconds=60,
         )
+        self.addCleanup(second_manager.close)
 
         self.assertTrue(stored.path.is_file())
         self.assertIn(
@@ -111,7 +119,12 @@ class StorageManagerTests(unittest.IsolatedAsyncioTestCase):
         nested.mkdir(parents=True)
         (nested / "episode.txt").write_text("unindexed", encoding="utf-8")
 
-        manager = StorageManager(existing_root, minimum_free_bytes=0)
+        manager = StorageManager(
+            existing_root,
+            minimum_free_bytes=0,
+            reconciliation_interval_seconds=60,
+        )
+        self.addCleanup(manager.close)
 
         self.assertEqual(self.visible_contents(existing_root), set())
         self.assertTrue((existing_root / ".storage-index.sqlite3").is_file())
@@ -137,7 +150,8 @@ class StorageManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.async_add_directory("shows/example")
         other_root = Path(self.temp_dir.name) / "async-storage"
         storage_id = await self.manager.async_add_storage(
-            other_root, storage_id="async"
+            other_root,
+            storage_id="async",
         )
         entries = await self.manager.async_list_entries()
         info = await self.manager.async_get_storage(self.manager.default_storage_id)
@@ -145,6 +159,75 @@ class StorageManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("shows/example", {entry.relative_path for entry in entries})
         self.assertEqual(info.used_bytes, 0)
         self.assertEqual(storage_id, "async")
+
+    async def test_custom_logger_and_debug_settings_are_shared_with_all_roots(
+        self,
+    ) -> None:
+        output = io.StringIO()
+        custom_logger = logging.Logger("test.storage.custom", level=logging.DEBUG)
+        custom_logger.addHandler(logging.StreamHandler(output))
+        manager = StorageManager(
+            Path(self.temp_dir.name) / "logged-primary",
+            minimum_free_bytes=0,
+            reconciliation_interval_seconds=None,
+            debug=True,
+            logger=custom_logger,
+        )
+        self.addCleanup(manager.close)
+        secondary_id = manager.add_storage(
+            Path(self.temp_dir.name) / "logged-secondary",
+            storage_id="secondary",
+        )
+        manager.add_directory("shows/example", storage_id=secondary_id)
+        stored = await manager.save_upload(
+            MemoryUpload(b"logged upload"),
+            "episode.txt",
+            storage_id=secondary_id,
+            directory="shows/example",
+        )
+        manager.list_entries(storage_id=secondary_id)
+        manager.remove(f"shows/example/{stored.filename}", storage_id=secondary_id)
+        logs = output.getvalue()
+
+        self.assertIn("Registered storage 'secondary'", logs)
+        self.assertIn("Created and indexed", logs)
+        self.assertIn("Stored and indexed upload", logs)
+        self.assertIn("sha256=", logs)
+        self.assertNotIn("logged upload", logs)
+        self.assertIn("Listed", logs)
+        self.assertIn("Removed indexed entry", logs)
+
+        manager.print_debug = True
+        printed = io.StringIO()
+        with redirect_stdout(printed):
+            manager.add_directory("debug-printed")
+        self.assertIn("[storage DEBUG]", printed.getvalue())
+
+    async def test_background_monitor_removes_unindexed_files_without_manual_call(
+        self,
+    ) -> None:
+        monitored_root = Path(self.temp_dir.name) / "monitored"
+        manager = StorageManager(
+            monitored_root,
+            minimum_free_bytes=0,
+            reconciliation_interval_seconds=0.02,
+        )
+        self.addCleanup(manager.close)
+        stored = await manager.save_upload(
+            MemoryUpload(b"keep this indexed file"), "indexed.txt"
+        )
+        unindexed = monitored_root / "created-outside-manager.txt"
+        unindexed.write_text("should be removed automatically", encoding="utf-8")
+
+        deadline = time.monotonic() + 2
+        while unindexed.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+
+        self.assertFalse(
+            unindexed.exists(),
+            "periodic reconciliation should remove unindexed files",
+        )
+        self.assertTrue(stored.path.is_file())
 
     async def test_remove_file_and_recursive_directory_updates_index(self) -> None:
         self.manager.add_directory("shows/example")
@@ -277,7 +360,9 @@ class StorageManagerTests(unittest.IsolatedAsyncioTestCase):
             Path(self.temp_dir.name) / "limited",
             "4 B",
             minimum_free_bytes=0,
+            reconciliation_interval_seconds=60,
         )
+        self.addCleanup(limited_manager.close)
         with self.assertRaises(InsufficientStorageError):
             await limited_manager.save_upload(
                 MemoryUpload(b"five!"),
