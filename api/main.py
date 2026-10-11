@@ -22,7 +22,9 @@ from core.config import get_settings
 
 from core.logging import LoggingConfig, configure_logging, get_logger
 
-from core.database import engine, Base
+from core.database import engine
+
+from core.storage import StorageManager
 
 from sqlalchemy import text
 
@@ -56,6 +58,12 @@ logging.getLogger("sqlalchemy.engine").setLevel(
     logging.INFO if settings.DEBUG else logging.WARNING
 )
 
+# storage manager initialzation
+storage = StorageManager(
+    default_path=".localdevstorage",
+    default_allocation="30 GiB"
+)
+
 # Uvicorn's default handlers bypass the root logger. Forward its server logs
 # through the configured handlers; request lines are logged by the middleware.
 for logger_name in ("uvicorn", "uvicorn.error"):
@@ -84,7 +92,12 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("----- %s Started -----", app.title)
-
+    try:
+        app.state.storage = storage
+        logger.info("Local storage manager initialized at path: %s", storage.default_storage_id)
+    except Exception as e:
+        logger.error("error occured when trying to initialize local storage manager: %s", e)
+        
     if settings.DEBUG:
         # listing routes
         route_lines = []
@@ -137,7 +150,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error While begining database '{settings.DATABASE_URL}': {e}")
 
-    logger.info("Database Beginned!")
+    logger.info("Backend API Initialized!")
     yield
 
     logger.info("Stopping/dispossing Database")
