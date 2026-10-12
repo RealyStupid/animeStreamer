@@ -195,6 +195,7 @@ async def lifespan(app: FastAPI):
     logger.info("Backend API Initialized!\n")
     yield
 
+    logger.info("Stopping storage manager")
     await storage.async_close()
 
     logger.info("Stopping/dispossing Database")
