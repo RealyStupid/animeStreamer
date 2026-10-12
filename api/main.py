@@ -29,6 +29,7 @@ from sqlalchemy import text
 
 from routes.auth import auth
 from routes.users import users
+from routes.media import media
 
 # Settings
 settings = get_settings()
@@ -86,7 +87,7 @@ logging.getLogger("sqlalchemy.engine").setLevel(
 )
 
 # storage manager initialzation
-storage = StorageManager(
+storage: StorageManager = StorageManager(
     default_path=".localDevStorage" if settings.ENVIRONMENT == "development" else ".localStorage",
     default_allocation="10 GiB",
     debug=settings.DEBUG,
@@ -191,7 +192,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error While begining database '{settings.DATABASE_URL}': {e}")
 
-    logger.info("Backend API Initialized!")
+    logger.info("Backend API Initialized!\n")
     yield
 
     await storage.async_close()
@@ -332,6 +333,7 @@ API_PREFIX = "/api/v1"
 
 app.include_router(auth,        prefix=API_PREFIX)
 app.include_router(users,       prefix=API_PREFIX)
+app.include_router(media,       prefix=API_PREFIX)
 
 # Health & Meta
 @app.get("/api/health", tags=["Meta"])

@@ -7,7 +7,7 @@ from datetime import datetime
 
 from sqlalchemy.dialects.postgresql import UUID, CITEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import DateTime, Text, func, Enum, ForeignKey, Integer, String
+from sqlalchemy import DateTime, Text, func, Enum, ForeignKey, Integer, String, Table, Column
 
 from core.database import Base
 
@@ -45,6 +45,24 @@ class GenreEnum(str, enum.Enum):
     COMEDY = "comedy"
     SCI_FI = "sci-fi"
 
+# The Association Table (Junction Table)
+show_tags = Table(
+    "show_tags",
+    Base.metadata,
+    Column("show_id", ForeignKey("shows.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+)
+
+# The Tags Model
+class Tags(Base):
+    __tablename__ = "tags"
+
+    id:     Mapped[uuid.UUID]     = uuid_pk()
+    name:   Mapped[str]           = mapped_column(String(50), unique=True, nullable=False)
+
+    shows:  Mapped[list["Shows"]] = relationship("Shows", secondary=show_tags, back_populates="tags")
+
+
 class Shows(Base):
     __tablename__ = "shows"
 
@@ -56,6 +74,7 @@ class Shows(Base):
     created_at:         Mapped[datetime]        = now_col()
 
     # Relationship: one show got many seasons. this is a seperate database linked into this one
+    tags:               Mapped[list["Tags"]]    = relationship("Tags", secondary=show_tags, back_populates="shows", lazy="selectin")
     seasons:            Mapped[list["Seasons"]] = relationship("Seasons", back_populates="show", cascade="all, delete-orphan")
 
 class Seasons(Base):

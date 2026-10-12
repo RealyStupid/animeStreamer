@@ -244,7 +244,7 @@ from typing import AsyncGenerator, Generator, Protocol
 
 _CHUNK_SIZE = 1024 * 1024
 _DEFAULT_MINIMUM_FREE_BYTES = 64 * 1024 * 1024
-_IMAGE_TYPES = {
+_IMAGE_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
@@ -254,7 +254,7 @@ _IMAGE_TYPES = {
     ".tif": "image/tiff",
     ".tiff": "image/tiff",
 }
-_VIDEO_TYPES = {
+_VIDEO_TYPES: dict[str, str] = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
     ".mov": "video/quicktime",
@@ -262,24 +262,26 @@ _VIDEO_TYPES = {
     ".webm": "video/webm",
     ".avi": "video/x-msvideo",
 }
-_TEXT_TYPES = {
+_TEXT_TYPES: dict[str, str] = {
     ".txt": "text/plain",
     ".srt": "text/plain",
     ".vtt": "text/plain",
 }
-_STORAGE_ID_RE = re.compile(r"^(?!\.{1,2}$)[A-Za-z0-9._-]{1,64}$")
-_SIZE_RE = re.compile(
+_STORAGE_ID_RE: re.Pattern[str] = re.compile(
+    r"^(?!\.{1,2}$)[A-Za-z0-9._-]{1,64}$"
+)
+_SIZE_RE: re.Pattern[str] = re.compile(
     r"^\s*(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)?\s*$",
     re.IGNORECASE,
 )
-_DECIMAL_MULTIPLIERS = {
+_DECIMAL_MULTIPLIERS: dict[str, int] = {
     "b": 1,
     "kb": 1_000,
     "mb": 1_000_000,
     "gb": 1_000_000_000,
     "tb": 1_000_000_000_000,
 }
-_BINARY_MULTIPLIERS = {
+_BINARY_MULTIPLIERS: dict[str, int] = {
     "kib": 1024,
     "mib": 1024**2,
     "gib": 1024**3,
@@ -287,7 +289,7 @@ _BINARY_MULTIPLIERS = {
 }
 _INDEX_FILENAME = ".storage-index.sqlite3"
 _LOCK_FILENAME = ".storage.lock"
-_INDEX_METADATA_NAMES = {
+_INDEX_METADATA_NAMES: set[str] = {
     _INDEX_FILENAME,
     f"{_INDEX_FILENAME}-journal",
     f"{_INDEX_FILENAME}-wal",
@@ -689,7 +691,7 @@ class StorageManager:
             raise TypeError(
                 "logger must provide debug, info, warning, error, and exception methods."
             )
-        self.minimum_free_bytes = parse_size(minimum_free_bytes)
+        self.minimum_free_bytes: int = parse_size(minimum_free_bytes)
         self._logging = _StorageLogging(
             logger=(
                 logger
@@ -714,7 +716,7 @@ class StorageManager:
             debug,
             print_debug,
         )
-        self.default_storage_id = self.add_storage(
+        self.default_storage_id: str = self.add_storage(
             default_path, default_allocation
         )
         if reconciliation_interval_seconds is not None:
