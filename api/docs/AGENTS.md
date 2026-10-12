@@ -30,3 +30,4 @@ implementation, not with intended or planned behavior.
 - `security.md` documents password hashing and bearer-token authentication.
 - `storage.md` documents local storage, indexing, quotas, placement, cleanup,
   and lifecycle.
+- `startup_checks.md` documents the development-only startup test gate.

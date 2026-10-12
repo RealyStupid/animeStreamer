@@ -21,6 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from core.config import get_settings
 from core.logging import LoggingConfig, configure_logging, get_logger
 from core.database import engine
+from core.startup_checks import run_development_tests
 from core.storage import StorageManager
 
 
@@ -86,15 +87,6 @@ logging.getLogger("sqlalchemy.engine").setLevel(
     logging.INFO if settings.DEBUG else logging.WARNING
 )
 
-# storage manager initialzation
-storage: StorageManager = StorageManager(
-    default_path=".localDevStorage" if settings.ENVIRONMENT == "development" else ".localStorage",
-    default_allocation="10 GiB",
-    debug=settings.DEBUG,
-    print_debug=False,
-    logger=storage_logger,
-)
-
 # Uvicorn's default handlers bypass the root logger. Forward its server logs
 # through the configured handlers; request lines are logged by the middleware.
 for logger_name in ("uvicorn", "uvicorn.error"):
@@ -123,6 +115,23 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("----- %s Started -----", app.title)
+
+    if settings.ENVIRONMENT == "development":
+        try:
+            test_output = run_development_tests()
+        except Exception:
+            logger.exception("Development startup tests failed; refusing to start.")
+            raise
+        logger.info("Development startup tests passed:\n%s", test_output)
+
+    storage: StorageManager = StorageManager(
+        default_path=".localDevStorage" if settings.ENVIRONMENT == "development" else ".localStorage",
+        default_allocation="10 GiB",
+        debug=settings.DEBUG,
+        print_debug=False,
+        logger=storage_logger,
+    )
+
     try:
         app.state.storage = storage
         logger.info("Local storage manager initialized at path: %s", storage.default_storage_id)
