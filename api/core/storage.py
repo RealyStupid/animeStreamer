@@ -86,7 +86,16 @@ Quick start
        )
 
 4. Pass FastAPI's ``UploadFile`` (or another async object with ``read(size)``)
-   directly to ``save_upload``. You can select an existing indexed destination
+   directly to ``save_upload``. Without ``storage_id``, the manager automatically
+   picks the registered root with the most available space that can fit the
+   complete upload. FastAPI's ``UploadFile.size`` is used to make that decision
+   before the request body is written. If no root can fit it, the call raises
+   ``InsufficientStorageError``; it never silently falls back to a partially
+   written file. If an async upload stream has no ``size`` attribute (or its
+   value is ``None``), placement uses the root with the most currently
+   available bytes and capacity is still checked as chunks arrive. You can
+   still pass ``storage_id`` to pin an upload to one specific root. You can
+   also select an existing indexed destination
    directory. The original client filename is used only to select an allowed
    extension; the stored filename is random and cannot contain client path
    components:
@@ -94,12 +103,13 @@ Quick start
        stored = await storage.save_upload(
            upload=upload_file,
            filename=upload_file.filename or "",
-           storage_id=archive_id,
+           # Omit storage_id for automatic placement, or supply archive_id
+           # to pin this upload to that storage.
            directory="shows/space-opera",
        )
 
-   ``stored.filename`` is the generated basename. ``stored.path`` is the
-   absolute local path, ``stored.storage_id`` identifies the root, and
+   ``stored.storage_id`` tells you which root was selected. ``stored.filename``
+   is the generated basename. ``stored.path`` is the absolute local path, and
    ``stored.media_type``, ``stored.size_bytes``, and ``stored.sha256`` describe
    the accepted content. Persist the storage ID and generated filename (or a
    relative path) in the application's SQL database; do not treat the local
@@ -400,6 +410,10 @@ class InsufficientStorageError(StorageError):
 
 class AsyncReadable(Protocol):
     async def read(self, size: int = -1) -> bytes: ...
+
+
+class SizedAsyncReadable(AsyncReadable, Protocol):
+    size: int | None
 
 
 class StorageLogger(Protocol):
@@ -1008,6 +1022,51 @@ class StorageManager:
             self.add_directory, relative_path, storage_id=storage_id
         )
 
+    def _select_upload_storage(
+        self,
+        storage_id: str | None,
+        expected_size: int | None,
+    ) -> _StorageLocation:
+        """Choose the best-fit registered location, or honor an explicit pin."""
+        if storage_id is not None:
+            return self._get_location(storage_id)
+
+        with self._registry_lock:
+            locations = tuple(self._locations.values())
+        if not locations:
+            raise InsufficientStorageError("No storage locations are registered.")
+
+        required_bytes = 1 if expected_size is None else expected_size
+        capacities = [
+            (location, self.get_storage(location.storage_id).available_bytes)
+            for location in locations
+        ]
+        capacities.sort(key=lambda item: item[1], reverse=True)
+
+        for location, available_bytes in capacities:
+            if available_bytes >= required_bytes:
+                location.logging.info(
+                    "Automatic upload placement selected storage '%s' "
+                    "(available=%d bytes, upload_size=%s).",
+                    location.storage_id,
+                    available_bytes,
+                    "unknown" if expected_size is None else expected_size,
+                )
+                return location
+
+        self._logging.warning(
+            "No registered storage can fit the upload (size=%s bytes). "
+            "Capacities: %s.",
+            "unknown" if expected_size is None else expected_size,
+            ", ".join(
+                f"{location.storage_id}={available} bytes"
+                for location, available in capacities
+            ),
+        )
+        raise InsufficientStorageError(
+            "No registered storage has enough available space for this upload."
+        )
+
     async def save_upload(
         self,
         upload: AsyncReadable,
@@ -1017,7 +1076,14 @@ class StorageManager:
         directory: str | None = None,
     ) -> StoredObject:
         """Validate, stream, and index an upload without trusting its name."""
-        location = self._get_location(storage_id or self.default_storage_id)
+        expected_size = getattr(upload, "size", None)
+        if expected_size is not None and (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+        ):
+            raise InvalidUploadError("Upload size must be a non-negative byte count.")
+        location = self._select_upload_storage(storage_id, expected_size)
         self._log_debug(
             "Starting upload validation for storage '%s' (destination=%s).",
             location.storage_id,

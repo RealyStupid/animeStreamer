@@ -24,6 +24,7 @@ class MemoryUpload:
     def __init__(self, content: bytes) -> None:
         self.content = content
         self.offset = 0
+        self.size = len(content)
 
     async def read(self, size: int = -1) -> bytes:
         if size < 0:
@@ -92,6 +93,65 @@ class StorageManagerTests(unittest.IsolatedAsyncioTestCase):
         entries = self.manager.list_entries(storage_id=storage_id)
         self.assertIn("", {entry.relative_path for entry in entries})
         self.assertIn(stored.filename, {entry.relative_path for entry in entries})
+
+    async def test_automatic_balancer_uses_other_storage_when_default_is_full(
+        self,
+    ) -> None:
+        primary_root = Path(self.temp_dir.name) / "primary"
+        secondary_root = Path(self.temp_dir.name) / "secondary"
+        manager = StorageManager(
+            primary_root,
+            "5 B",
+            minimum_free_bytes=0,
+            reconciliation_interval_seconds=60,
+        )
+        self.addCleanup(manager.close)
+        secondary_id = manager.add_storage(
+            secondary_root,
+            allocation="20 B",
+            storage_id="secondary",
+        )
+
+        first = await manager.save_upload(
+            MemoryUpload(b"12345"),
+            "first.txt",
+            storage_id=manager.default_storage_id,
+        )
+        second = await manager.save_upload(MemoryUpload(b"1234567890"), "second.txt")
+
+        self.assertEqual(first.storage_id, manager.default_storage_id)
+        self.assertEqual(second.storage_id, secondary_id)
+        self.assertTrue(second.path.is_file())
+        self.assertEqual(manager.get_storage(secondary_id).used_bytes, 10)
+
+    async def test_automatic_balancer_raises_when_no_storage_can_fit_upload(self) -> None:
+        primary_root = Path(self.temp_dir.name) / "primary-full"
+        secondary_root = Path(self.temp_dir.name) / "secondary-full"
+        manager = StorageManager(
+            primary_root,
+            "2 B",
+            minimum_free_bytes=0,
+            reconciliation_interval_seconds=60,
+        )
+        self.addCleanup(manager.close)
+        secondary_id = manager.add_storage(
+            secondary_root,
+            allocation="2 B",
+            storage_id="secondary-full",
+        )
+
+        await manager.save_upload(MemoryUpload(b"11"), "first.txt")
+        await manager.save_upload(
+            MemoryUpload(b"22"), "second.txt", storage_id=secondary_id
+        )
+        with self.assertRaises(InsufficientStorageError):
+            await manager.save_upload(MemoryUpload(b"3"), "third.txt")
+
+        self.assertEqual(
+            manager.get_storage(manager.default_storage_id).used_bytes,
+            2,
+        )
+        self.assertEqual(manager.get_storage(secondary_id).used_bytes, 2)
 
     async def test_index_persists_and_is_reused_by_a_new_manager(self) -> None:
         stored = await self.manager.save_upload(
