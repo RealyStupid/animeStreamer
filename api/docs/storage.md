@@ -252,6 +252,21 @@ indexed entry beneath it.
 
 ## Uploads and content checks
 
+### Episode video conversion
+
+Episode creation and replacement use the system `ffmpeg` executable to
+normalize uploaded video before it is added to indexed storage. Install FFmpeg
+on every API host and ensure it is available on `PATH`. The output is MP4 with
+H.264 video, AAC audio when an audio track exists, 8-bit `yuv420p`, and a
+maximum dimension of 1920x1080; MP4 metadata is moved to the beginning for
+progressive playback. The original upload is not retained.
+
+Conversion runs with a one-hour timeout and rejects input larger than the
+storage manager's currently available capacity. If FFmpeg is unavailable, the
+API returns `503`; unsupported, malformed, or failed conversions return `422`.
+Transcoding requires temporary disk space for both the incoming source and
+converted output, in addition to the final storage quota.
+
 ### `save_upload(upload, filename, *, storage_id=None, directory=None)`
 
 This is async and accepts an async reader returning `bytes` from
@@ -389,6 +404,12 @@ Directly deleting or renaming files outside this method is detected on the
 next reconciliation, which prunes stale rows. `async_remove` is the
 worker-thread wrapper for async handlers.
 
+The media API's owner-only `DELETE /media/my/shows/{show_id}`,
+`DELETE /media/my/seasons/{season_id}`, and
+`DELETE /media/my/episodes/{episode_id}` routes use recursive indexed removal
+before deleting their database records. Deleting a show also removes all
+season and episode files; deleting a season also removes its episode files.
+
 ## Reconciliation and active cleanup
 
 ### `reconcile_storage(storage_id=None)`
@@ -480,4 +501,3 @@ In this repository's development setup, the virtual environment is at
 The tests create temporary roots and use in-memory async readers. They exercise
 the actual SQLite/filesystem behavior without touching the API's configured
 storage root or connecting to the API SQL database.
-

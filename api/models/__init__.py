@@ -7,7 +7,18 @@ from datetime import datetime
 
 from sqlalchemy.dialects.postgresql import UUID, CITEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import DateTime, Text, func, Enum, ForeignKey, Integer, String, Table, Column
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    func,
+)
 
 from core.database import Base
 
@@ -71,20 +82,30 @@ class Shows(Base):
     description:        Mapped[str]             = mapped_column(Text, nullable=False, server_default="No description provided")
     genre:              Mapped[GenreEnum]       = mapped_column(Enum(GenreEnum, name="genre_enum", native_enum=True, values_callable=lambda obj: [e.value for e in obj]), default=GenreEnum.DRAMA, server_default=GenreEnum.DRAMA.value, nullable=False)
     thumbnail_url:      Mapped[str]             = mapped_column(Text, nullable=True)
+    is_private:         Mapped[bool]            = mapped_column(default=False, server_default="false", nullable=False)
+    created_by_id:      Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at:         Mapped[datetime]        = now_col()
 
-    # Relationship: one show got many seasons. this is a seperate database linked into this one
+    created_by:         Mapped["Users | None"]  = relationship(foreign_keys=[created_by_id])
     tags:               Mapped[list["Tags"]]    = relationship("Tags", secondary=show_tags, back_populates="shows", lazy="selectin")
     seasons:            Mapped[list["Seasons"]] = relationship("Seasons", back_populates="show", cascade="all, delete-orphan")
 
 class Seasons(Base):
     __tablename__ = "seasons"
+    __table_args__ = (
+        UniqueConstraint("show_id", "season_number", name="uq_seasons_show_season_number"),
+    )
 
     id:                 Mapped[uuid.UUID]       = uuid_pk()
     show_id:            Mapped[uuid.UUID]       = mapped_column(ForeignKey("shows.id", ondelete="CASCADE"), nullable=False)
     season_number:      Mapped[int]             = mapped_column(Integer, nullable=False)
+    name:               Mapped[str]             = mapped_column(String(255), nullable=False, server_default="Season")
+    description:        Mapped[str]             = mapped_column(Text, nullable=False, server_default="No description provided")
+    thumbnail_url:      Mapped[str | None]      = mapped_column(Text, nullable=True)
+    created_by_id:      Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at:         Mapped[datetime]        = now_col()
 
+    created_by:         Mapped["Users | None"]  = relationship(foreign_keys=[created_by_id])
     show:               Mapped["Shows"]         = relationship("Shows", back_populates="seasons")
     episodes:           Mapped[list["Episode"]] = relationship("Episode", back_populates="season", cascade="all, delete-orphan")
 
@@ -98,6 +119,8 @@ class Episode(Base):
     description:        Mapped[str]             = mapped_column(Text, nullable=True)
     video_url:          Mapped[str]             = mapped_column(Text, nullable=False) 
     duration_secs:      Mapped[int]             = mapped_column(Integer, nullable=True)
+    created_by_id:      Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at:         Mapped[datetime]        = now_col()
 
+    created_by:         Mapped["Users | None"]  = relationship(foreign_keys=[created_by_id])
     season:             Mapped["Seasons"]       = relationship("Seasons", back_populates="episodes")
